@@ -40,8 +40,14 @@ class DocumentPipeline:
 
         if (classification.document_class == DocumentClass.INVOICE):
 
+            all_regions = [
+                region
+                for page in ocr_result.pages
+                for region in page.regions
+            ]
+
             extracted_data = (
-                self.invoice_extractor.extract(ocr_result.full_text)
+                self.invoice_extractor.extract(text=ocr_result.full_text, regions=all_regions)
             )
 
             validation = (

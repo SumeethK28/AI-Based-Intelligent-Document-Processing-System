@@ -1,7 +1,7 @@
 from pathlib import Path
 
 import cv2
-import fitz
+import pymupdf
 import numpy as np
 
 from idp.models.document import Document, DocumentType
@@ -39,7 +39,7 @@ class PageProcessor:
 
         pages = []
 
-        pdf_document = fitz.open(pdf_path)
+        pdf_document = pymupdf.open(pdf_path)
 
         try:
             for page_index in range(len(pdf_document)):
@@ -47,7 +47,7 @@ class PageProcessor:
                 page = pdf_document.load_page(page_index)
 
                 pixmap = page.get_pixmap(
-                    matrix=fitz.Matrix(2, 2),
+                    matrix=pymupdf.Matrix(2, 2),
                     alpha=False
                 )
 
