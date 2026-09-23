@@ -72,21 +72,21 @@ desktop.ini
 # Project Data
 # ==========================================
 
-data/
+/data/
 
 
 # ==========================================
 # Generated Results
 # ==========================================
 
-results/
+/results/
 
 
 # ==========================================
 # Logs
 # ==========================================
 
-logs/
+/logs/
 *.log
 
 
@@ -94,8 +94,8 @@ logs/
 # Model / ML Artifacts
 # ==========================================
 
-models/
-checkpoints/
+/models/
+/checkpoints/
 
 *.pt
 *.pth
@@ -110,6 +110,6 @@ checkpoints/
 # Temporary Files
 # ==========================================
 
-tmp/
-temp/
+/tmp/
+/temp/
 *.tmp
