@@ -3,6 +3,7 @@ import tempfile
 
 import streamlit as st
 
+from idp.models.classification import DocumentClass
 from idp.ocr.rapidocr_engine import RapidOCREngine
 from idp.pipeline.document_pipeline import DocumentPipeline
 
@@ -69,7 +70,7 @@ uploaded_file = st.file_uploader(
 if uploaded_file is None:
 
     st.info(
-        "Upload an invoice to begin document processing."
+        "Upload a document to begin processing."
     )
 
 else:
@@ -89,7 +90,9 @@ else:
 
     if uploaded_file.type.startswith("image"):
 
-        st.subheader("Document Preview")
+        st.subheader(
+            "Document Preview"
+        )
 
         st.image(
             uploaded_file,
@@ -163,7 +166,6 @@ else:
             ) = st.columns(4)
 
 
-            # Document Type
             column1.metric(
                 "Document Type",
                 result.classification
@@ -174,7 +176,6 @@ else:
             )
 
 
-            # OCR Confidence
             column2.metric(
                 "OCR Confidence",
                 (
@@ -183,14 +184,12 @@ else:
             )
 
 
-            # Number of Pages
             column3.metric(
                 "Pages",
                 result.ocr.total_pages,
             )
 
 
-            # Validation Status
             if result.validation:
 
                 validation_status = (
@@ -225,7 +224,13 @@ else:
                     "Extracted Information"
                 )
 
-                invoice = result.extracted_data
+                extracted = (
+                    result.extracted_data
+                )
+
+                document_class = (
+                    result.classification.document_class
+                )
 
                 (
                     left_column,
@@ -233,92 +238,188 @@ else:
                 ) = st.columns(2)
 
 
-                # ---------------------------------------------
-                # LEFT COLUMN
-                # ---------------------------------------------
+                # =============================================
+                # INVOICE INFORMATION
+                # =============================================
 
-                with left_column:
+                if (
+                    document_class
+                    == DocumentClass.INVOICE
+                ):
 
-                    st.text_input(
-                        "Invoice Number",
-                        value=(
-                            invoice.invoice_number
-                            or ""
-                        ),
-                        disabled=True,
-                    )
-
-                    st.text_input(
-                        "Issue Date",
-                        value=(
-                            invoice.issue_date
-                            or ""
-                        ),
-                        disabled=True,
-                    )
-
-                    st.text_input(
-                        "Seller",
-                        value=(
-                            invoice.seller
-                            or ""
-                        ),
-                        disabled=True,
-                    )
-
-                    st.text_input(
-                        "Client",
-                        value=(
-                            invoice.client
-                            or ""
-                        ),
-                        disabled=True,
-                    )
-
-
-                # ---------------------------------------------
-                # RIGHT COLUMN
-                # ---------------------------------------------
-
-                with right_column:
-
-                    st.text_input(
-                        "Tax ID",
-                        value=(
-                            invoice.tax_id
-                            or ""
-                        ),
-                        disabled=True,
-                    )
-
-                    st.text_input(
-                        "IBAN",
-                        value=(
-                            invoice.iban
-                            or ""
-                        ),
-                        disabled=True,
-                    )
-
-                    st.text_input(
-                        "Total",
-                        value=(
-                            invoice.total
-                            or ""
-                        ),
-                        disabled=True,
-                    )
-
-
-                    if result.validation:
+                    with left_column:
 
                         st.text_input(
-                            "Validation Score",
+                            "Invoice Number",
                             value=(
-                                f"{result.validation.validation_score * 100:.2f}%"
+                                extracted.invoice_number
+                                or ""
                             ),
                             disabled=True,
                         )
+
+                        st.text_input(
+                            "Issue Date",
+                            value=(
+                                extracted.issue_date
+                                or ""
+                            ),
+                            disabled=True,
+                        )
+
+                        st.text_input(
+                            "Seller",
+                            value=(
+                                extracted.seller
+                                or ""
+                            ),
+                            disabled=True,
+                        )
+
+                        st.text_input(
+                            "Client",
+                            value=(
+                                extracted.client
+                                or ""
+                            ),
+                            disabled=True,
+                        )
+
+
+                    with right_column:
+
+                        st.text_input(
+                            "Tax ID",
+                            value=(
+                                extracted.tax_id
+                                or ""
+                            ),
+                            disabled=True,
+                        )
+
+                        st.text_input(
+                            "IBAN",
+                            value=(
+                                extracted.iban
+                                or ""
+                            ),
+                            disabled=True,
+                        )
+
+                        st.text_input(
+                            "Total",
+                            value=(
+                                extracted.total
+                                or ""
+                            ),
+                            disabled=True,
+                        )
+
+
+                # =============================================
+                # PURCHASE ORDER INFORMATION
+                # =============================================
+
+                elif (
+                    document_class
+                    == DocumentClass.PURCHASE_ORDER
+                ):
+
+                    with left_column:
+
+                        st.text_input(
+                            "PO Number",
+                            value=(
+                                extracted.po_number
+                                or ""
+                            ),
+                            disabled=True,
+                        )
+
+                        st.text_input(
+                            "Order Date",
+                            value=(
+                                extracted.order_date
+                                or ""
+                            ),
+                            disabled=True,
+                        )
+
+                        st.text_input(
+                            "Vendor",
+                            value=(
+                                extracted.vendor
+                                or ""
+                            ),
+                            disabled=True,
+                        )
+
+
+                    with right_column:
+
+                        st.text_input(
+                            "Bill To",
+                            value=(
+                                extracted.bill_to
+                                or ""
+                            ),
+                            disabled=True,
+                        )
+
+                        st.text_input(
+                            "Ship To",
+                            value=(
+                                extracted.ship_to
+                                or ""
+                            ),
+                            disabled=True,
+                        )
+
+                        st.text_input(
+                            "Total",
+                            value=(
+                                extracted.total
+                                or ""
+                            ),
+                            disabled=True,
+                        )
+
+
+                # =============================================
+                # VALIDATION SCORE
+                # =============================================
+
+                if result.validation:
+
+                    st.write(
+                        "**Validation Score:** "
+                        f"{result.validation.validation_score * 100:.2f}%"
+                    )
+
+
+            # =================================================
+            # NO EXTRACTOR AVAILABLE
+            # =================================================
+
+            else:
+
+                document_class = (
+                    result.classification
+                    .document_class
+                )
+
+                if (
+                    document_class
+                    not in {
+                        DocumentClass.UNKNOWN,
+                    }
+                ):
+
+                    st.info(
+                        "The document was classified successfully, "
+                        "but structured extraction for this document "
+                        "type has not been implemented yet."
+                    )
 
 
             # =================================================
@@ -333,10 +434,6 @@ else:
                     "Validation Details"
                 )
 
-
-                # ---------------------------------------------
-                # AUTOMATIC DECISION
-                # ---------------------------------------------
 
                 if not result.validation.requires_review:
 
@@ -354,7 +451,7 @@ else:
 
 
                 # ---------------------------------------------
-                # MISSING FIELDS
+                # Missing fields
                 # ---------------------------------------------
 
                 if result.validation.missing_fields:
@@ -373,7 +470,7 @@ else:
 
 
                 # ---------------------------------------------
-                # INVALID FIELDS
+                # Invalid fields
                 # ---------------------------------------------
 
                 if result.validation.invalid_fields:
@@ -392,7 +489,7 @@ else:
 
 
                 # ---------------------------------------------
-                # WARNINGS
+                # Warnings
                 # ---------------------------------------------
 
                 if result.validation.warnings:
@@ -409,10 +506,6 @@ else:
                             f"- {warning}"
                         )
 
-
-                # ---------------------------------------------
-                # VALIDATION SCORE
-                # ---------------------------------------------
 
                 st.write(
                     "**Required-field validation score:** "
@@ -455,11 +548,15 @@ else:
                     "**Matched keywords:**"
                 )
 
-                if result.classification.matched_keywords:
+                if (
+                    result.classification
+                    .matched_keywords
+                ):
 
                     st.write(
                         ", ".join(
-                            result.classification.matched_keywords
+                            result.classification
+                            .matched_keywords
                         )
                     )
 
