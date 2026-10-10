@@ -109,19 +109,48 @@ def main():
 
     print("\nValidation warnings:")
 
-    for warning in final_state.get(
-        "validation_warnings",
-        [],
-    ):
+    for warning in final_state.get("validation_warnings",[],):
         print(f"  - {warning}")
 
-    print("\n=== AGENT EXECUTION HISTORY ===")
+    print("\n=== ANOMALY DETECTION AGENT ===")
+
+    print("Risk level:",final_state.get("risk_level"))
+
+    anomalies = final_state.get("anomalies", [])
+
+    if anomalies:
+        for anomaly in anomalies:
+            print(
+                f"[{anomaly['severity'].upper()}] "
+                f"{anomaly['code']}: "
+                f"{anomaly['description']}"
+            )
+    else:
+        print("No anomalies detected by current rules.")
+
+
+    print("\n=== WORKFLOW ROUTING AGENT ===")
+
+    print(
+        "Workflow status:",
+        final_state.get("workflow_status")
+    )
+
+    print(
+        "Assigned department:",
+        final_state.get("assigned_department")
+    )
+
+    print(
+        "Routing reason:",
+        final_state.get("routing_reason")
+    )
+
+    print("\n=== COMPLETE AGENT HISTORY ===")
+
     print(
         " -> ".join(
-            final_state.get(
-                "agent_history",
-                []
-            )
+            final_state.get("agent_history", [])
         )
     )
 
