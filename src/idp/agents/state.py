@@ -25,6 +25,8 @@ class DocumentState(TypedDict, total=False):
     # Validation Agent
     validation_passed: bool
     validation_errors: list[str]
+    validation_warnings: list[str]
+    requires_review: bool
 
     # Anomaly Agent
     anomalies: list[dict[str, Any]]

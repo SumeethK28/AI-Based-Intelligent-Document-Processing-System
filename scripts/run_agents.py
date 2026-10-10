@@ -87,6 +87,34 @@ def main():
         )
     )
 
+    print("\n=== VALIDATION AGENT ===")
+
+    print(
+        "Validation passed:",
+        final_state.get("validation_passed"),
+    )
+
+    print(
+        "Requires review:",
+        final_state.get("requires_review"),
+    )
+
+    print("\nValidation errors:")
+
+    for error in final_state.get(
+        "validation_errors",
+        [],
+    ):
+        print(f"  - {error}")
+
+    print("\nValidation warnings:")
+
+    for warning in final_state.get(
+        "validation_warnings",
+        [],
+    ):
+        print(f"  - {warning}")
+
     print("\n=== AGENT EXECUTION HISTORY ===")
     print(
         " -> ".join(
