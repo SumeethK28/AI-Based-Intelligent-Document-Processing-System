@@ -194,6 +194,15 @@ class InvoiceExtractor:
         return match.group(1).upper()
 
     def _extract_total(self, lines: list[str]) -> str | None:
+        from idp.utils.money import parse_money
+        for index in range(len(lines) - 1, -1, -1):
+            match = re.fullmatch(r"(?:grand total|total amount|amount due|gross worth|total)\s*:?(?:\s+(.+))?", lines[index], re.I)
+            if match:
+                candidate = match.group(1)
+                if candidate and parse_money(candidate) is not None:
+                    return candidate.strip()
+                if not candidate and index + 1 < len(lines) and parse_money(lines[index + 1]) is not None:
+                    return lines[index + 1]
         for index, line in enumerate(lines):
 
             if line.lower() == "total":

@@ -3,10 +3,10 @@ import numpy as np
 
 class ImagePreprocessor:
     def preprocess(self, image: np.ndarray, grayscale: bool = True, enhance_contrast: bool = False, denoise: bool = False, threshold: bool = False) -> np.ndarray:
-        processed = image.copy()
-
         if image is None or image.size == 0:
             raise ValueError("Cannot preprocess an empty image.")
+
+        processed = image.copy()
 
         if grayscale:
             processed = self.to_grayscale(processed)
@@ -19,6 +19,8 @@ class ImagePreprocessor:
 
         if threshold:
             processed = self.apply_threshold(processed)
+
+        return processed
 
     def to_grayscale(self, image: np.ndarray) -> np.ndarray:
 

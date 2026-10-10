@@ -9,8 +9,6 @@ from idp.pipeline.document_pipeline import DocumentPipeline
 import json
 from idp.storage.repository import DocumentRepository
 
-from idp.verification.cross_document import CrossDocumentVerifier
-from idp.agents.routing_agent import WorkflowRoutingAgent
 
 def main():
 
@@ -83,7 +81,7 @@ def main():
     )
 
     # STEP 2: Build the agent graph.
-    graph = build_agent_graph()
+    graph = build_agent_graph(repository=repository)
 
     # STEP 3: Prepare initial shared state.
     initial_state = {
@@ -105,50 +103,7 @@ def main():
     # CROSS-DOCUMENT VERIFICATION
     # ====================================================
 
-    verifier = CrossDocumentVerifier(
-        repository=repository
-    )
-
-    cross_result = verifier.verify(
-        final_state
-    )
-
-    final_state.update(cross_result)
-
-    issues = cross_result["cross_document_issues"]
-
-    # Verification issues are review signals.
-    # They must affect the final workflow decision.
-
-    if issues:
-
-        final_state["anomalies"] = (
-            final_state.get("anomalies", [])
-            + issues
-        )
-
-        final_state["requires_review"] = True
-
-        final_state["risk_level"] = (
-            "medium"
-        )
-
-        # Re-evaluate routing using the updated risk/review
-        # state before storing the final document.
-        routing_agent = WorkflowRoutingAgent()
-
-        routing_result = routing_agent.run(
-            final_state
-        )
-
-        final_state.update(
-            routing_result
-        )
-
-    final_state["agent_history"] = (
-        final_state.get("agent_history", [])
-        + ["cross_document_verification"]
-    )
+    issues = final_state["cross_document_issues"]
 
     print("\n=== CROSS-DOCUMENT VERIFICATION ===")
 

@@ -2,6 +2,7 @@ from pathlib import Path
 
 from idp.classification.keyword_classifier import KeywordDocumentClassifier
 
+from idp.extraction.receipt_extractor import ReceiptExtractor
 from idp.extraction.invoice_extractor import InvoiceExtractor
 from idp.extraction.purchase_order_extractor import PurchaseOrderExtractor
 
@@ -185,6 +186,9 @@ class DocumentPipeline:
                 )
             )
 
+
+        if classification.document_class == DocumentClass.RECEIPT:
+            extracted_data = ReceiptExtractor().extract(ocr_result.full_text)
 
         # =============================================
         # STEP 6: RETURN COMPLETE RESULT

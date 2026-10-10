@@ -1,63 +1,75 @@
 
-import re
 from decimal import Decimal
+from typing import Any
 
-from idp.agents.validation_agent import ValidationAgent
 from idp.storage.repository import DocumentRepository
+from idp.utils.money import parse_money
 
 
 class CrossDocumentVerifier:
+    """
+    Verifies an invoice against a previously stored
+    Purchase Order using:
+
+    1. Purchase Order reference matching
+    2. Vendor / seller consistency
+    3. Currency consistency
+    4. Total amount consistency
+
+    Returns the verification status, detected issues,
+    and the matched Purchase Order document ID.
+    """
 
     def __init__(
         self,
         repository: DocumentRepository,
     ):
         self.repository = repository
-        self.validator = ValidationAgent()
+
+    # ========================================================
+    # NORMALIZE COMPANY / PERSON NAMES
+    # ========================================================
 
     @staticmethod
     def normalize_name(value: str | None) -> str:
+        """
+        Normalize names for case-insensitive comparison.
+
+        Example:
+            "ABC Technologies"
+            "abc technologies"
+
+        Both become:
+            "abc technologies"
+        """
         return " ".join(
             str(value or "").casefold().split()
         )
 
-    @staticmethod
-    def currency(value: str | None) -> str | None:
-        """
-        Only recognize explicit currency symbols.
-        Unknown currency is not assumed to match.
-        """
-        if not value:
-            return None
-
-        symbols = {
-            "₹": "INR",
-            "$": "USD",
-            "€": "EUR",
-            "£": "GBP",
-        }
-
-        found = {
-            currency
-            for symbol, currency in symbols.items()
-            if symbol in value
-        }
-
-        return next(iter(found)) if len(found) == 1 else None
+    # ========================================================
+    # CREATE VERIFICATION ISSUE
+    # ========================================================
 
     @staticmethod
     def issue(
         code: str,
         description: str,
         severity: str = "medium",
-    ) -> dict:
+    ) -> dict[str, str]:
         return {
             "code": code,
             "description": description,
             "severity": severity,
         }
 
-    def verify(self, state: dict) -> dict:
+    # ========================================================
+    # VERIFY DOCUMENT
+    # ========================================================
+
+    def verify(
+        self,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
 
         document_type = state.get(
             "document_type",
@@ -69,62 +81,101 @@ class CrossDocumentVerifier:
             {},
         )
 
-        # Currently verify invoices against stored POs.
+        # ----------------------------------------------------
+        # STEP 1: CHECK DOCUMENT TYPE
+        # ----------------------------------------------------
+
+        # Currently, cross-document verification checks
+        # invoices against previously stored purchase orders.
+
         if document_type != "invoice":
+
             return {
                 "cross_document_status": "not_applicable",
                 "cross_document_issues": [],
                 "matched_document_id": None,
             }
 
-        po_reference = fields.get("po_reference")
+        # ----------------------------------------------------
+        # STEP 2: EXTRACT PURCHASE ORDER REFERENCE
+        # ----------------------------------------------------
+
+        po_reference = fields.get(
+            "po_reference"
+        )
 
         if not po_reference:
+
             return {
                 "cross_document_status": "not_checked",
                 "cross_document_issues": [],
                 "matched_document_id": None,
             }
 
-        candidates = self.repository.find_purchase_orders(
-            str(po_reference)
+        # ----------------------------------------------------
+        # STEP 3: SEARCH SQLITE DATABASE
+        # ----------------------------------------------------
+
+        candidates = (
+            self.repository.find_purchase_orders(
+                str(po_reference)
+            )
         )
 
+        # No purchase order exists with this reference.
+
         if not candidates:
+
             return {
                 "cross_document_status": "unmatched",
                 "cross_document_issues": [
                     self.issue(
-                        "PO_NOT_FOUND",
-                        f"No stored Purchase Order matches "
-                        f"reference {po_reference}.",
+                        code="PO_NOT_FOUND",
+                        description=(
+                            "No stored Purchase Order matches "
+                            f"reference {po_reference}."
+                        ),
                     )
                 ],
                 "matched_document_id": None,
             }
 
+        # Multiple stored purchase orders have the same
+        # PO number. Do not select one arbitrarily.
+
         if len(candidates) > 1:
+
             return {
                 "cross_document_status": "ambiguous",
                 "cross_document_issues": [
                     self.issue(
-                        "MULTIPLE_PO_MATCHES",
-                        "Multiple stored Purchase Orders "
-                        "share this reference.",
+                        code="MULTIPLE_PO_MATCHES",
+                        description=(
+                            "Multiple stored Purchase Orders "
+                            "share this reference."
+                        ),
                     )
                 ],
                 "matched_document_id": None,
             }
 
+        # ----------------------------------------------------
+        # STEP 4: RETRIEVE MATCHED PURCHASE ORDER
+        # ----------------------------------------------------
+
         po = candidates[0]
-        po_fields = po["extracted_fields"]
 
-        issues = []
-        incomplete_checks = []
+        po_fields = po[
+            "extracted_fields"
+        ]
 
-        # ---------------------------------------------
-        # Vendor / seller comparison
-        # ---------------------------------------------
+        issues: list[dict[str, str]] = []
+
+        incomplete_checks: list[str] = []
+
+        # ====================================================
+        # STEP 5: COMPARE VENDOR / SELLER
+        # ====================================================
 
         invoice_seller = self.normalize_name(
             fields.get("seller")
@@ -137,102 +188,154 @@ class CrossDocumentVerifier:
         if invoice_seller and po_vendor:
 
             if invoice_seller != po_vendor:
+
                 issues.append(
                     self.issue(
-                        "VENDOR_MISMATCH",
-                        "Invoice seller does not match "
-                        "Purchase Order vendor.",
-                    )
-                )
-
-        else:
-            incomplete_checks.append(
-                "Vendor comparison was not possible."
-            )
-
-        # ---------------------------------------------
-        # Total comparison
-        # ---------------------------------------------
-
-        invoice_total_text = fields.get("total")
-        po_total_text = po_fields.get("total")
-
-        invoice_total = (
-            self.validator.parse_amount(
-                invoice_total_text
-            )
-            if invoice_total_text else None
-        )
-
-        po_total = (
-            self.validator.parse_amount(
-                po_total_text
-            )
-            if po_total_text else None
-        )
-
-        invoice_currency = self.currency(
-            invoice_total_text
-        )
-
-        po_currency = self.currency(
-            po_total_text
-        )
-
-        if (
-            invoice_total is not None
-            and po_total is not None
-            and invoice_currency is not None
-            and invoice_currency == po_currency
-        ):
-
-            difference = invoice_total - po_total
-
-            if abs(difference) > Decimal("0.02"):
-                issues.append(
-                    self.issue(
-                        "TOTAL_MISMATCH",
-                        (
-                            f"Invoice total {invoice_total} "
-                            f"differs from PO total {po_total} "
-                            f"by {difference:+} "
-                            f"{invoice_currency}."
+                        code="VENDOR_MISMATCH",
+                        description=(
+                            "Invoice seller does not match "
+                            "Purchase Order vendor. "
+                            f"Invoice: {fields.get('seller')}; "
+                            f"Purchase Order: "
+                            f"{po_fields.get('vendor')}."
                         ),
                     )
                 )
 
         else:
+
             incomplete_checks.append(
-                "Totals could not be safely compared "
-                "because amounts or currency information "
-                "were missing or incompatible."
+                "Vendor comparison was not possible "
+                "because seller or vendor information "
+                "was missing."
             )
 
-        # ---------------------------------------------
-        # Decision
-        # ---------------------------------------------
+        # ====================================================
+        # STEP 6: PARSE TOTALS AND CURRENCIES
+        # ====================================================
+
+        invoice_money = parse_money(
+            fields.get("total")
+        )
+
+        po_money = parse_money(
+            po_fields.get("total")
+        )
+
+        # ----------------------------------------------------
+        # CASE A: INVALID OR MISSING AMOUNT
+        # ----------------------------------------------------
+
+        if (
+            invoice_money is None
+            or po_money is None
+        ):
+
+            incomplete_checks.append(
+                "One or both document totals could "
+                "not be parsed."
+            )
+
+        # ----------------------------------------------------
+        # CASE B: MISSING CURRENCY
+        # ----------------------------------------------------
+
+        elif (
+            invoice_money.currency is None
+            or po_money.currency is None
+        ):
+
+            incomplete_checks.append(
+                "Currency information is missing "
+                "from one or both document totals."
+            )
+
+        # ----------------------------------------------------
+        # CASE C: DIFFERENT CURRENCIES
+        # ----------------------------------------------------
+
+        elif (
+            invoice_money.currency
+            != po_money.currency
+        ):
+
+            issues.append(
+                self.issue(
+                    code="CURRENCY_MISMATCH",
+                    description=(
+                        "Invoice and Purchase Order use "
+                        "different currencies. "
+                        f"Invoice: {invoice_money.currency}; "
+                        f"Purchase Order: {po_money.currency}."
+                    ),
+                )
+            )
+
+        # ----------------------------------------------------
+        # CASE D: SAME CURRENCY — COMPARE AMOUNTS
+        # ----------------------------------------------------
+
+        else:
+
+            difference = (
+                invoice_money.amount
+                - po_money.amount
+            )
+
+            tolerance = Decimal("0.02")
+
+            if abs(difference) > tolerance:
+
+                issues.append(
+                    self.issue(
+                        code="TOTAL_MISMATCH",
+                        description=(
+                            f"Invoice total "
+                            f"{invoice_money.amount} "
+                            f"differs from Purchase Order total "
+                            f"{po_money.amount} "
+                            f"by {difference:+} "
+                            f"{invoice_money.currency}."
+                        ),
+                    )
+                )
+
+        # ====================================================
+        # STEP 7: DETERMINE VERIFICATION STATUS
+        # ====================================================
 
         if issues:
+
             status = "mismatch"
 
         elif incomplete_checks:
+
             status = "incomplete"
 
         else:
+
             status = "matched"
+
+        # ====================================================
+        # STEP 8: CONVERT INCOMPLETE CHECKS INTO ISSUES
+        # ====================================================
+
+        for message in incomplete_checks:
+
+            issues.append(
+                self.issue(
+                    code="INCOMPLETE_COMPARISON",
+                    description=message,
+                    severity="low",
+                )
+            )
+
+        # ====================================================
+        # STEP 9: RETURN RESULTS
+        # ====================================================
 
         return {
             "cross_document_status": status,
-            "cross_document_issues": (
-                issues
-                + [
-                    self.issue(
-                        "INCOMPLETE_COMPARISON",
-                        message,
-                        "low",
-                    )
-                    for message in incomplete_checks
-                ]
-            ),
+            "cross_document_issues": issues,
             "matched_document_id": po["document_id"],
         }

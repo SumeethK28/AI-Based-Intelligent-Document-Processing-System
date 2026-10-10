@@ -1,11 +1,11 @@
 
-import re
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Any
 
 from idp.agents.state import DocumentState
-
+from idp.utils.money import parse_money
+from idp.utils.evidence import normalize_evidence
 
 class ValidationAgent:
 
@@ -23,22 +23,26 @@ class ValidationAgent:
             "vendor",
         ],
         "receipt": [
+            "seller",
+            "issue_date",
             "total",
         ],
-        # Contracts have varying structures.
-        # We don't impose a universal field schema yet.
-        "contract": [],
+        # Missing agreement metadata requires review.
+        "contract": ["contract_title", "party_a", "party_b", "effective_date"],
     }
 
     DATE_FIELDS = {
         "issue_date",
         "order_date",
+        "effective_date",
+        "expiration_date",
     }
 
     AMOUNT_FIELDS = {
         "subtotal",
         "tax",
         "total",
+        "contract_value",
     }
 
     @staticmethod
@@ -46,62 +50,38 @@ class ValidationAgent:
         return " ".join(str(value).casefold().split())
 
     @staticmethod
-    def parse_date(value: str) -> bool:
+    def date_value(value: str):
         formats = (
             "%d/%m/%Y",
             "%m/%d/%Y",
             "%Y-%m-%d",
             "%d-%m-%Y",
             "%m-%d-%Y",
+            "%d %B %Y",
+            "%B %d, %Y",
+            "%d %b %Y",
         )
 
         for fmt in formats:
             try:
-                datetime.strptime(value.strip(), fmt)
-                return True
+                return datetime.strptime(value.strip(), fmt).date()
             except ValueError:
                 continue
 
-        return False
+        return None
+
+    @classmethod
+    def parse_date(cls, value: str) -> bool:
+        return cls.date_value(value) is not None
 
     @staticmethod
     def parse_amount(value: str) -> Decimal | None:
-        """
-        Accept unambiguous common currency formatting.
-        Reject ambiguous single-separator amounts instead
-        of guessing decimal conventions.
-        """
-        raw = str(value).strip()
+        money = parse_money(value)
 
-        cleaned = re.sub(
-            r"[$€£₹,\s]",
-            "",
-            raw,
-        )
-
-        # A comma may be a thousands separator, but
-        # '$ 819,06' uses a decimal comma. Handle that.
-        compact = re.sub(r"[$€£₹\s]", "", raw)
-
-        if re.fullmatch(r"-?\d+,\d{2}", compact):
-            cleaned = compact.replace(",", ".")
-
-        elif re.fullmatch(
-            r"-?\d{1,3}(,\d{3})+(\.\d{1,2})?",
-            compact,
-        ):
-            cleaned = compact.replace(",", "")
-
-        elif re.fullmatch(r"-?\d+(\.\d{1,2})?", compact):
-            cleaned = compact
-
-        else:
+        if money is None:
             return None
 
-        try:
-            return Decimal(cleaned)
-        except InvalidOperation:
-            return None
+        return money.amount
 
     def run(self, state: DocumentState) -> dict[str, Any]:
 
@@ -157,6 +137,7 @@ class ValidationAgent:
                     f"Missing required field: {field}"
                 )
 
+
         # =============================================
         # STEP 3: EVIDENCE VALIDATION
         # =============================================
@@ -168,23 +149,58 @@ class ValidationAgent:
 
             normalized_value = self.normalize_text(value)
 
+            # The extracted value itself should be
+            # traceable to the OCR text.
             if normalized_value not in normalized_ocr:
                 warnings.append(
-                    f"Extracted value is not found "
-                    f"verbatim in OCR: {field}"
+                    f"Extracted value is not found in OCR: {field}"
                 )
 
-            evidence_text = evidence.get(field, "")
+            evidence_text = normalize_evidence(evidence.get(field, ""))
 
-            if (
-                not evidence_text
-                or self.normalize_text(evidence_text)
-                not in normalized_ocr
-            ):
+            if not evidence_text:
                 warnings.append(
-                    f"Missing or unverifiable "
-                    f"OCR evidence: {field}"
+                    f"Missing OCR evidence: {field}"
                 )
+                continue
+
+            # First attempt: verify the complete evidence.
+            normalized_evidence = self.normalize_text(
+                evidence_text
+            )
+
+            if normalized_evidence in normalized_ocr:
+                continue
+
+            # Second attempt: handle non-contiguous
+            # label/value evidence in OCR tables.
+            evidence_lines = [
+                self.normalize_text(line)
+                for line in evidence_text.splitlines()
+                if line.strip()
+            ]
+
+            # Accept split evidence only when:
+            # 1. The evidence has multiple components.
+            # 2. Every component appears in OCR.
+            # 3. The extracted value also appears in OCR.
+            #
+            # This verifies textual presence, not that
+            # the label/value association is correct.
+            split_evidence_found = (
+                len(evidence_lines) >= 2
+                and normalized_value in normalized_ocr
+                and all(
+                    part in normalized_ocr
+                    for part in evidence_lines
+                )
+            )
+
+            if not split_evidence_found:
+                warnings.append(
+                    f"Missing or unverifiable OCR evidence: {field}"
+                )
+
 
         # =============================================
         # STEP 4: DATE VALIDATION
@@ -252,6 +268,16 @@ class ValidationAgent:
                     f"subtotal + tax = {expected_total}, "
                     f"but total = {actual_total}"
                 )
+
+        if document_type == "contract":
+            party_a = self.normalize_text(fields.get("party_a") or "")
+            party_b = self.normalize_text(fields.get("party_b") or "")
+            if party_a and party_a == party_b:
+                errors.append("Contract parties must be distinct.")
+            start = self.date_value(str(fields.get("effective_date") or ""))
+            end = self.date_value(str(fields.get("expiration_date") or ""))
+            if start and end and end < start:
+                errors.append("Contract expiration date precedes effective date.")
 
         # =============================================
         # STEP 7: REVIEW DECISION

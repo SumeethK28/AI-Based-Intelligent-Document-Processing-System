@@ -47,6 +47,16 @@ class AIExtractionResult(BaseModel):
 
     po_reference: str | None = None
 
+    payment_method: str | None = None
+    contract_title: str | None = None
+    contract_number: str | None = None
+    party_a: str | None = None
+    party_b: str | None = None
+    effective_date: str | None = None
+    expiration_date: str | None = None
+    contract_value: str | None = None
+    governing_law: str | None = None
+
     # Evidence helps us check hallucinations later.
     field_evidence: dict[str, str] = Field(
         default_factory=dict

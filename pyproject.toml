@@ -16,6 +16,7 @@ dependencies = [
     "pymupdf>=1.28.2",
     "python-dotenv>=1.2.4",
     "rapidocr>=3.9.2",
+    "reportlab>=5.0.1",
     "streamlit>=1.64.0",
 ]
 

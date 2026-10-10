@@ -10,15 +10,19 @@ from idp.agents.anomaly_agent import AnomalyDetectionAgent
 from idp.agents.routing_agent import WorkflowRoutingAgent
 
 from idp.llm.provider import GroqProvider
+from idp.storage.repository import DocumentRepository
+from idp.agents.cross_document_agent import CrossDocumentAgent
 
 
-def build_agent_graph():
+def build_agent_graph(repository=None, llm=None):
 
     # =============================================
     # INITIALIZE AI MODEL PROVIDER
     # =============================================
 
-    llm = GroqProvider()
+    llm = llm if llm is not None else GroqProvider()
+    repository = repository if repository is not None else DocumentRepository()
+    verification_agent = CrossDocumentAgent(repository)
 
     # =============================================
     # INITIALIZE SPECIALIZED AGENTS
@@ -89,10 +93,9 @@ def build_agent_graph():
         "anomaly_agent",
     )
 
-    graph.add_edge(
-        "anomaly_agent",
-        "routing_agent",
-    )
+    graph.add_node("cross_document_verification", verification_agent.run)
+    graph.add_edge("anomaly_agent", "cross_document_verification")
+    graph.add_edge("cross_document_verification", "routing_agent")
 
     graph.add_edge(
         "routing_agent",

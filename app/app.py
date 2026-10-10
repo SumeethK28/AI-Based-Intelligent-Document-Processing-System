@@ -1,11 +1,12 @@
-from pathlib import Path
+
+import hashlib
+import json
 import tempfile
+from pathlib import Path
 
 import streamlit as st
 
-from idp.models.classification import DocumentClass
-from idp.ocr.rapidocr_engine import RapidOCREngine
-from idp.pipeline.document_pipeline import DocumentPipeline
+from idp.pipeline.agentic_pipeline import AgenticDocumentPipeline
 
 
 # ============================================================
@@ -13,7 +14,7 @@ from idp.pipeline.document_pipeline import DocumentPipeline
 # ============================================================
 
 st.set_page_config(
-    page_title="Intelligent Document Processing",
+    page_title="Enterprise Intelligent Document Processing",
     page_icon="📄",
     layout="wide",
 )
@@ -24,573 +25,1084 @@ st.set_page_config(
 # ============================================================
 
 @st.cache_resource
-def create_pipeline():
+def get_pipeline():
+    return AgenticDocumentPipeline()
 
-    ocr_engine = RapidOCREngine()
 
-    return DocumentPipeline(
-        ocr_engine=ocr_engine
+pipeline = get_pipeline()
+repository = pipeline.repository
+
+
+# ============================================================
+# SESSION STATE
+# ============================================================
+
+def clear_processing_result():
+    st.session_state.pop("last_result", None)
+    st.session_state.pop("last_upload_hash", None)
+
+
+# ============================================================
+# HELPER FUNCTIONS
+# ============================================================
+
+def format_name(value: str) -> str:
+    return str(value).replace("_", " ").title()
+
+
+def display_issues(issues):
+    if not issues:
+        st.success("No issues reported.")
+        return
+
+    for issue in issues:
+        if isinstance(issue, dict):
+            severity = issue.get("severity", "unknown")
+            code = issue.get("code", "ISSUE")
+            description = issue.get("description", "")
+
+            st.warning(
+                f"[{severity.upper()}] "
+                f"{code}: {description}"
+            )
+        else:
+            st.warning(str(issue))
+
+
+def show_processing_result(result):
+
+    state = result["state"]
+
+    st.divider()
+    st.header("Processing Results")
+
+    # --------------------------------------------------------
+    # Processing metadata
+    # --------------------------------------------------------
+
+    st.caption(
+        f"Document ID: {result['document_id']}  |  "
+        f"Processing Run: {result['run_id']}"
+    )
+
+    if result.get("duplicate"):
+        st.warning(
+            "Exact duplicate detected. "
+            "Previously stored processing results were reused."
+        )
+
+    elif result.get("reprocessed"):
+        st.info(
+            "This document was reprocessed using the "
+            "current AI pipeline."
+        )
+
+    # --------------------------------------------------------
+    # Summary metrics
+    # --------------------------------------------------------
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    col1.metric(
+        "Document Type",
+        format_name(
+            state.get("document_type", "unknown")
+        ),
+    )
+
+    col2.metric(
+        "OCR Confidence",
+        (
+            f"{state.get('ocr_confidence', 0) * 100:.2f}%"
+        ),
+    )
+
+    col3.metric(
+        "Risk Level",
+        format_name(
+            state.get("risk_level", "unknown")
+        ),
+    )
+
+    col4.metric(
+        "Workflow Status",
+        format_name(
+            state.get("workflow_status", "unknown")
+        ),
+    )
+
+    # --------------------------------------------------------
+    # Classification details
+    # --------------------------------------------------------
+
+    st.subheader("AI Document Classification")
+
+    st.write(
+        "**Detected Type:**",
+        format_name(
+            state.get("document_type", "unknown")
+        ),
+    )
+
+    st.write(
+        "**Model-Reported Confidence:**",
+        f"{state.get('classification_confidence', 0) * 100:.2f}%",
+    )
+
+    evidence = state.get(
+        "classification_evidence", []
+    )
+
+    if evidence:
+        with st.expander("Classification Evidence"):
+            for item in evidence:
+                st.write(f"- {item}")
+
+    # --------------------------------------------------------
+    # AI extraction
+    # --------------------------------------------------------
+
+    st.subheader("AI-Extracted Information")
+
+    st.caption(
+        "Values extracted by the Groq-powered "
+        "Information Extraction Agent."
+    )
+
+    fields = state.get("extracted_fields", {})
+
+    if fields:
+
+        left, right = st.columns(2)
+
+        for index, (field, value) in enumerate(
+            fields.items()
+        ):
+
+            column = left if index % 2 == 0 else right
+
+            with column:
+                st.text_input(
+                    format_name(field),
+                    value=(
+                        str(value)
+                        if value is not None
+                        else ""
+                    ),
+                    disabled=True,
+                    key=(
+                        f"extracted_"
+                        f"{result['document_id']}_"
+                        f"{result['run_id']}_{field}"
+                    ),
+                )
+
+    else:
+        st.info(
+            "No structured fields were extracted."
+        )
+
+    with st.expander("Field Evidence"):
+        st.json(
+            state.get("field_evidence", {})
+        )
+
+    # --------------------------------------------------------
+    # Validation
+    # --------------------------------------------------------
+
+    st.divider()
+    st.subheader("Validation Agent")
+
+    if state.get("validation_passed"):
+
+        st.success(
+            "Preliminary field validation passed."
+        )
+
+    else:
+
+        st.warning(
+            "Validation failed or manual verification "
+            "is required."
+        )
+
+    errors = state.get(
+        "validation_errors", []
+    )
+
+    warnings = state.get(
+        "validation_warnings", []
+    )
+
+    if errors:
+        st.write("**Validation Errors**")
+
+        for error in errors:
+            st.error(error)
+
+    if warnings:
+        st.write("**Validation Warnings**")
+
+        for warning in warnings:
+            st.warning(warning)
+
+    if not errors and not warnings:
+        st.write(
+            "No validation problems reported."
+        )
+
+    # --------------------------------------------------------
+    # Anomaly detection
+    # --------------------------------------------------------
+
+    st.divider()
+    st.subheader("Anomaly Detection Agent")
+
+    anomalies = state.get(
+        "anomalies", []
+    )
+
+    if anomalies:
+        display_issues(anomalies)
+    else:
+        st.success(
+            "No anomalies detected by the current rules."
+        )
+
+    # --------------------------------------------------------
+    # Cross-document verification
+    # --------------------------------------------------------
+
+    st.divider()
+    st.subheader("Cross-Document Verification")
+
+    cross_status = state.get(
+        "cross_document_status",
+        "not_checked",
+    )
+
+    st.write(
+        "**Verification Status:**",
+        format_name(cross_status),
+    )
+
+    matched_id = state.get(
+        "matched_document_id"
+    )
+
+    if matched_id is not None:
+        st.write(
+            "**Matched Purchase Order ID:**",
+            matched_id,
+        )
+
+    cross_issues = state.get(
+        "cross_document_issues",
+        [],
+    )
+
+    if cross_issues:
+
+        display_issues(cross_issues)
+
+    elif cross_status == "matched":
+
+        st.success(
+            "Matching Purchase Order found. "
+            "Implemented comparisons passed."
+        )
+
+    elif cross_status == "not_checked":
+
+        st.info(
+            "Cross-document verification was not "
+            "performed because no PO reference was found."
+        )
+
+    elif cross_status == "not_applicable":
+
+        st.info(
+            "Cross-document verification does not "
+            "apply to this document type."
+        )
+
+    # --------------------------------------------------------
+    # Workflow routing
+    # --------------------------------------------------------
+
+    st.divider()
+    st.subheader("Workflow Routing Agent")
+
+    st.write(
+        "**Workflow Status:**",
+        format_name(
+            state.get("workflow_status", "unknown")
+        ),
+    )
+
+    st.write(
+        "**Assigned Department:**",
+        state.get(
+            "assigned_department",
+            "Unknown"
+        ),
+    )
+
+    st.write(
+        "**Routing Reason:**",
+        state.get(
+            "routing_reason",
+            "No reason available."
+        ),
+    )
+
+    # --------------------------------------------------------
+    # Agent execution history
+    # --------------------------------------------------------
+
+    with st.expander("Agent Execution History"):
+
+        history = state.get(
+            "agent_history", []
+        )
+
+        if history:
+            for index, agent in enumerate(
+                history,
+                start=1,
+            ):
+                st.write(
+                    f"{index}. {format_name(agent)}"
+                )
+        else:
+            st.info(
+                "No agent execution history available."
+            )
+
+    # --------------------------------------------------------
+    # OCR text
+    # --------------------------------------------------------
+
+    with st.expander("View Full OCR Text"):
+
+        st.text_area(
+            "Recognized Document Text",
+            value=state.get(
+                "ocr_text",
+                "",
+            ),
+            height=350,
+            disabled=True,
+            key=(
+                f"ocr_{result['document_id']}_"
+                f"{result['run_id']}"
+            ),
+        )
+
+    # --------------------------------------------------------
+    # JSON export
+    # --------------------------------------------------------
+
+    st.download_button(
+        "Download Processing Result (JSON)",
+        data=json.dumps(
+            state,
+            indent=2,
+            ensure_ascii=False,
+        ),
+        file_name=(
+            f"document_{result['document_id']}_"
+            f"run_{result['run_id']}.json"
+        ),
+        mime="application/json",
+        width="stretch",
     )
 
 
-pipeline = create_pipeline()
-
-
 # ============================================================
-# HEADER
+# APPLICATION HEADER
 # ============================================================
 
 st.title(
-    "AI-Based Intelligent Document Processing System"
+    "Enterprise Intelligent Document Processing"
 )
 
 st.caption(
-    "OCR • Document Classification • "
-    "Information Extraction • Validation"
+    "RapidOCR • Groq AI • LangGraph Multi-Agent System • "
+    "Cross-Document Verification • SQLite"
 )
 
 st.divider()
 
 
 # ============================================================
-# DOCUMENT UPLOAD
+# APPLICATION TABS
 # ============================================================
 
-uploaded_file = st.file_uploader(
-    "Upload a document",
-    type=[
-        "jpg",
-        "jpeg",
-        "png",
-        "pdf",
-    ],
+(
+    tab_process,
+    tab_history,
+    tab_review,
+    tab_analytics,
+) = st.tabs(
+    [
+        "Document Processing",
+        "Document History",
+        "Manual Review",
+        "Analytics Dashboard",
+    ]
 )
 
 
-if uploaded_file is None:
+# ============================================================
+# TAB 1 — DOCUMENT PROCESSING
+# ============================================================
 
-    st.info(
-        "Upload a document to begin processing."
+with tab_process:
+
+    st.header("Upload and Process Document")
+
+    uploaded_file = st.file_uploader(
+        "Choose a document",
+        type=[
+            "pdf",
+            "jpg",
+            "jpeg",
+            "png",
+        ],
+        key="document_uploader",
+        on_change=clear_processing_result,
     )
 
-else:
+    if uploaded_file is None:
 
-    st.success(
-        f"Selected document: {uploaded_file.name}"
-    )
-
-    file_suffix = Path(
-        uploaded_file.name
-    ).suffix
-
-
-    # ========================================================
-    # DOCUMENT PREVIEW
-    # ========================================================
-
-    if uploaded_file.type.startswith("image"):
-
-        st.subheader(
-            "Document Preview"
+        st.info(
+            "Upload an invoice, purchase order, "
+            "receipt, or contract to begin."
         )
 
-        st.image(
-            uploaded_file,
-            width=500,
+    else:
+
+        st.success(
+            f"Selected document: {uploaded_file.name}"
         )
 
+        # Show a preview for image files.
 
-    # ========================================================
-    # PROCESS BUTTON
-    # ========================================================
+        if uploaded_file.type.startswith("image/"):
 
-    process_button = st.button(
-        "Process Document",
-        type="primary",
-        use_container_width=True,
-    )
+            st.subheader("Document Preview")
 
+            st.image(
+                uploaded_file,
+                width=500,
+            )
 
-    if process_button:
+        # ----------------------------------------------------
+        # Reprocessing option
+        # ----------------------------------------------------
 
-        temporary_path = None
+        force_reprocess = st.checkbox(
+            "Reprocess even if document already exists",
+            value=False,
+            help=(
+                "When enabled, the document is processed "
+                "again using OCR and the agent workflow. "
+                "The latest result replaces the previously "
+                "stored result and consumes Groq API usage."
+            ),
+        )
 
-        try:
+        if force_reprocess:
 
-            # =================================================
-            # DOCUMENT PROCESSING
-            # =================================================
+            st.info(
+                "Forced reprocessing is enabled. "
+                "The existing document's latest stored "
+                "result will be updated."
+            )
 
-            with st.spinner(
-                "Processing document..."
-            ):
+        # ----------------------------------------------------
+        # Process button
+        # ----------------------------------------------------
 
-                with tempfile.NamedTemporaryFile(
-                    delete=False,
-                    suffix=file_suffix,
-                ) as temporary_file:
+        if st.button(
+            "Process with AI Agents",
+            type="primary",
+            width="stretch",
+        ):
 
-                    temporary_file.write(
-                        uploaded_file.getvalue()
+            temporary_path = None
+
+            # Clear previous output before new processing.
+
+            st.session_state.pop(
+                "last_result",
+                None,
+            )
+
+            try:
+
+                with st.spinner(
+                    "Processing document with AI agents..."
+                ):
+
+                    file_suffix = Path(
+                        uploaded_file.name
+                    ).suffix
+
+                    with tempfile.NamedTemporaryFile(
+                        delete=False,
+                        suffix=file_suffix,
+                    ) as temporary_file:
+
+                        file_bytes = uploaded_file.getvalue()
+
+                        temporary_file.write(
+                            file_bytes
+                        )
+
+                        temporary_path = Path(
+                            temporary_file.name
+                        )
+
+                    result = pipeline.process(
+                        file_path=temporary_path,
+                        original_filename=uploaded_file.name,
+                        force_reprocess=force_reprocess,
                     )
 
-                    temporary_path = Path(
-                        temporary_file.name
-                    )
+                    st.session_state[
+                        "last_result"
+                    ] = result
 
-                result = pipeline.process(
-                    temporary_path
+                    st.session_state[
+                        "last_upload_hash"
+                    ] = hashlib.sha256(
+                        file_bytes
+                    ).hexdigest()
+
+                st.success(
+                    result["message"]
+                )
+
+            except Exception as error:
+
+                st.error(
+                    "Document processing failed."
+                )
+
+                st.exception(
+                    error
+                )
+
+            finally:
+
+                if (
+                    temporary_path is not None
+                    and temporary_path.exists()
+                ):
+
+                    temporary_path.unlink()
+
+        # ----------------------------------------------------
+        # Display most recent result
+        # ----------------------------------------------------
+
+        last_result = st.session_state.get(
+            "last_result"
+        )
+
+        if last_result is not None:
+
+            current_hash = hashlib.sha256(
+                uploaded_file.getvalue()
+            ).hexdigest()
+
+            stored_hash = st.session_state.get(
+                "last_upload_hash"
+            )
+
+            if current_hash == stored_hash:
+                show_processing_result(
+                    last_result
                 )
 
 
-            st.success(
-                "Document processed successfully."
+# ============================================================
+# TAB 2 — DOCUMENT HISTORY
+# ============================================================
+
+with tab_history:
+
+    st.header(
+        "Processed Document History"
+    )
+
+    documents = repository.list_documents(
+        limit=500
+    )
+
+    runs = repository.list_processing_runs(
+        limit=500
+    )
+
+    if documents:
+
+        st.dataframe(
+            documents,
+            width="stretch",
+            hide_index=True,
+        )
+
+        st.subheader(
+            "Inspect Stored Document"
+        )
+
+        document_ids = [
+            document["id"]
+            for document in documents
+        ]
+
+        selected_id = st.selectbox(
+            "Select Document ID",
+            options=document_ids,
+            key="history_document_id",
+        )
+
+        stored_document = repository.get_document(
+            selected_id
+        )
+
+        if stored_document:
+
+            st.write(
+                "**Filename:**",
+                stored_document["filename"],
             )
 
-            st.divider()
-
-
-            # =================================================
-            # DOCUMENT ANALYSIS
-            # =================================================
-
-            st.header(
-                "Document Analysis"
-            )
-
-            (
-                column1,
-                column2,
-                column3,
-                column4,
-            ) = st.columns(4)
-
-
-            column1.metric(
-                "Document Type",
-                result.classification
-                .document_class
-                .value
-                .replace("_", " ")
-                .title(),
-            )
-
-
-            column2.metric(
-                "OCR Confidence",
-                (
-                    f"{result.ocr.average_confidence * 100:.2f}%"
+            st.write(
+                "**Document Type:**",
+                format_name(
+                    stored_document["document_type"]
                 ),
             )
 
+            st.write(
+                "**Workflow Status:**",
+                format_name(
+                    stored_document["workflow_status"]
+                ),
+            )
 
-            column3.metric(
-                "Pages",
-                result.ocr.total_pages,
+            st.write(
+                "**Review Decision:**",
+                format_name(
+                    stored_document["review_decision"]
+                ),
+            )
+
+            with st.expander(
+                "Stored AI-Extracted Information"
+            ):
+
+                st.json(
+                    stored_document["extracted_data"]
+                )
+
+            with st.expander(
+                "Complete Stored Agent State"
+            ):
+
+                st.json(
+                    stored_document["full_result"]
+                )
+
+    else:
+
+        st.info(
+            "No documents have been processed yet."
+        )
+
+    st.divider()
+
+    with st.expander(
+        "View Processing Run History"
+    ):
+
+        if runs:
+
+            st.dataframe(
+                runs,
+                width="stretch",
+                hide_index=True,
+            )
+
+        else:
+
+            st.info(
+                "No processing runs recorded."
             )
 
 
-            if result.validation:
+# ============================================================
+# TAB 3 — MANUAL REVIEW
+# ============================================================
 
-                validation_status = (
-                    "Auto Accepted"
-                    if not result.validation.requires_review
-                    else "Review Required"
-                )
+with tab_review:
 
-                column4.metric(
-                    "Validation",
-                    validation_status,
-                )
+    st.header(
+        "Human Review Queue"
+    )
 
-            else:
+    st.caption(
+        "Demo workflow for reviewing extracted "
+        "information and routing decisions."
+    )
 
-                column4.metric(
-                    "Validation",
-                    "N/A",
-                )
+    documents = repository.list_documents(
+        limit=500
+    )
 
+    review_queue = [
+        document
+        for document in documents
+        if (
+            document["review_decision"]
+            == "pending"
+        )
+    ]
 
-            st.divider()
+    if not review_queue:
 
+        st.success(
+            "No documents are awaiting a recorded "
+            "review decision."
+        )
 
-            # =================================================
-            # EXTRACTED INFORMATION
-            # =================================================
+    else:
 
-            if result.extracted_data:
+        st.dataframe(
+            review_queue,
+            width="stretch",
+            hide_index=True,
+        )
 
-                st.header(
-                    "Extracted Information"
-                )
+        selected_id = st.selectbox(
+            "Select Document for Review",
+            options=[
+                document["id"]
+                for document in review_queue
+            ],
+            key="review_document_id",
+        )
 
-                extracted = (
-                    result.extracted_data
-                )
+        selected_document = repository.get_document(
+            selected_id
+        )
 
-                document_class = (
-                    result.classification.document_class
-                )
+        if selected_document:
 
-                (
-                    left_column,
-                    right_column,
-                ) = st.columns(2)
+            st.subheader(
+                "Document Information"
+            )
 
+            st.write(
+                "**Filename:**",
+                selected_document["filename"],
+            )
 
-                # =============================================
-                # INVOICE INFORMATION
-                # =============================================
+            st.write(
+                "**Document Type:**",
+                format_name(
+                    selected_document["document_type"]
+                ),
+            )
 
-                if (
-                    document_class
-                    == DocumentClass.INVOICE
-                ):
+            st.write(
+                "**Workflow Status:**",
+                format_name(
+                    selected_document["workflow_status"]
+                ),
+            )
 
-                    with left_column:
+            stored_state = selected_document[
+                "full_result"
+            ]
 
-                        st.text_input(
-                            "Invoice Number",
-                            value=(
-                                extracted.invoice_number
-                                or ""
-                            ),
-                            disabled=True,
-                        )
+            st.write(
+                "**Assigned Department:**",
+                stored_state.get(
+                    "assigned_department",
+                    "Unknown"
+                ),
+            )
 
-                        st.text_input(
-                            "Issue Date",
-                            value=(
-                                extracted.issue_date
-                                or ""
-                            ),
-                            disabled=True,
-                        )
+            with st.expander(
+                "Review Extracted Fields"
+            ):
 
-                        st.text_input(
-                            "Seller",
-                            value=(
-                                extracted.seller
-                                or ""
-                            ),
-                            disabled=True,
-                        )
-
-                        st.text_input(
-                            "Client",
-                            value=(
-                                extracted.client
-                                or ""
-                            ),
-                            disabled=True,
-                        )
-
-
-                    with right_column:
-
-                        st.text_input(
-                            "Tax ID",
-                            value=(
-                                extracted.tax_id
-                                or ""
-                            ),
-                            disabled=True,
-                        )
-
-                        st.text_input(
-                            "IBAN",
-                            value=(
-                                extracted.iban
-                                or ""
-                            ),
-                            disabled=True,
-                        )
-
-                        st.text_input(
-                            "Total",
-                            value=(
-                                extracted.total
-                                or ""
-                            ),
-                            disabled=True,
-                        )
-
-
-                # =============================================
-                # PURCHASE ORDER INFORMATION
-                # =============================================
-
-                elif (
-                    document_class
-                    == DocumentClass.PURCHASE_ORDER
-                ):
-
-                    with left_column:
-
-                        st.text_input(
-                            "PO Number",
-                            value=(
-                                extracted.po_number
-                                or ""
-                            ),
-                            disabled=True,
-                        )
-
-                        st.text_input(
-                            "Order Date",
-                            value=(
-                                extracted.order_date
-                                or ""
-                            ),
-                            disabled=True,
-                        )
-
-                        st.text_input(
-                            "Vendor",
-                            value=(
-                                extracted.vendor
-                                or ""
-                            ),
-                            disabled=True,
-                        )
-
-
-                    with right_column:
-
-                        st.text_input(
-                            "Bill To",
-                            value=(
-                                extracted.bill_to
-                                or ""
-                            ),
-                            disabled=True,
-                        )
-
-                        st.text_input(
-                            "Ship To",
-                            value=(
-                                extracted.ship_to
-                                or ""
-                            ),
-                            disabled=True,
-                        )
-
-                        st.text_input(
-                            "Total",
-                            value=(
-                                extracted.total
-                                or ""
-                            ),
-                            disabled=True,
-                        )
-
-
-                # =============================================
-                # VALIDATION SCORE
-                # =============================================
-
-                if result.validation:
-
-                    st.write(
-                        "**Validation Score:** "
-                        f"{result.validation.validation_score * 100:.2f}%"
+                st.json(
+                    stored_state.get(
+                        "extracted_fields",
+                        {},
                     )
-
-
-            # =================================================
-            # NO EXTRACTOR AVAILABLE
-            # =================================================
-
-            else:
-
-                document_class = (
-                    result.classification
-                    .document_class
                 )
 
-                if (
-                    document_class
-                    not in {
-                        DocumentClass.UNKNOWN,
-                    }
-                ):
+            with st.expander(
+                "Review Validation and Anomalies"
+            ):
 
-                    st.info(
-                        "The document was classified successfully, "
-                        "but structured extraction for this document "
-                        "type has not been implemented yet."
-                    )
-
-
-            # =================================================
-            # VALIDATION DETAILS
-            # =================================================
-
-            if result.validation:
-
-                st.divider()
-
-                st.header(
-                    "Validation Details"
+                st.write(
+                    "**Validation Errors:**"
                 )
 
-
-                if not result.validation.requires_review:
-
-                    st.success(
-                        "Document passed automatic validation "
-                        "and can be accepted."
+                st.json(
+                    stored_state.get(
+                        "validation_errors",
+                        [],
                     )
+                )
 
-                else:
+                st.write(
+                    "**Anomalies:**"
+                )
+
+                st.json(
+                    stored_state.get(
+                        "anomalies",
+                        [],
+                    )
+                )
+
+                st.write(
+                    "**Cross-Document Issues:**"
+                )
+
+                st.json(
+                    stored_state.get(
+                        "cross_document_issues",
+                        [],
+                    )
+                )
+
+            # ------------------------------------------------
+            # Human review decision
+            # ------------------------------------------------
+
+            decision = st.selectbox(
+                "Review Decision",
+                options=[
+                    "approved",
+                    "rejected",
+                    "needs_correction",
+                ],
+                key="review_decision_select",
+            )
+
+            notes = st.text_area(
+                "Review Notes",
+                placeholder=(
+                    "Explain why this document "
+                    "is being approved, rejected, "
+                    "or returned for correction."
+                ),
+                key="review_notes",
+            )
+
+            if st.button(
+                "Save Review Decision",
+                type="primary",
+                width="stretch",
+            ):
+
+                if not notes.strip():
 
                     st.warning(
-                        "Document requires manual review because "
-                        "one or more fields are missing or invalid."
-                    )
-
-
-                # ---------------------------------------------
-                # Missing fields
-                # ---------------------------------------------
-
-                if result.validation.missing_fields:
-
-                    st.write(
-                        "**Missing fields:**"
-                    )
-
-                    for field in (
-                        result.validation.missing_fields
-                    ):
-
-                        st.write(
-                            f"- {field}"
-                        )
-
-
-                # ---------------------------------------------
-                # Invalid fields
-                # ---------------------------------------------
-
-                if result.validation.invalid_fields:
-
-                    st.write(
-                        "**Invalid fields:**"
-                    )
-
-                    for field in (
-                        result.validation.invalid_fields
-                    ):
-
-                        st.write(
-                            f"- {field}"
-                        )
-
-
-                # ---------------------------------------------
-                # Warnings
-                # ---------------------------------------------
-
-                if result.validation.warnings:
-
-                    st.write(
-                        "**Warnings:**"
-                    )
-
-                    for warning in (
-                        result.validation.warnings
-                    ):
-
-                        st.write(
-                            f"- {warning}"
-                        )
-
-
-                st.write(
-                    "**Required-field validation score:** "
-                    f"{result.validation.validation_score * 100:.2f}%"
-                )
-
-
-            # =================================================
-            # OCR DETAILS
-            # =================================================
-
-            st.divider()
-
-            with st.expander(
-                "View Full OCR Text"
-            ):
-
-                st.text_area(
-                    "Extracted Text",
-                    value=result.ocr.full_text,
-                    height=400,
-                    disabled=True,
-                )
-
-
-            # =================================================
-            # CLASSIFICATION DETAILS
-            # =================================================
-
-            with st.expander(
-                "Classification Details"
-            ):
-
-                st.write(
-                    "**Classification confidence:** "
-                    f"{result.classification.confidence * 100:.2f}%"
-                )
-
-                st.write(
-                    "**Matched keywords:**"
-                )
-
-                if (
-                    result.classification
-                    .matched_keywords
-                ):
-
-                    st.write(
-                        ", ".join(
-                            result.classification
-                            .matched_keywords
-                        )
+                        "Please provide review notes."
                     )
 
                 else:
 
-                    st.write(
-                        "No classification keywords matched."
+                    updated = repository.update_review(
+                        document_id=selected_id,
+                        decision=decision,
+                        notes=notes.strip(),
                     )
 
+                    if updated:
 
-        # =====================================================
-        # ERROR HANDLING
-        # =====================================================
+                        st.success(
+                            "Review decision saved."
+                        )
 
-        except Exception as error:
+                        st.rerun()
 
-            st.error(
-                "Document processing failed."
+                    else:
+
+                        st.error(
+                            "Document could not be updated."
+                        )
+
+
+# ============================================================
+# TAB 4 — ANALYTICS DASHBOARD
+# ============================================================
+
+with tab_analytics:
+
+    st.header(
+        "Document Analytics Dashboard"
+    )
+
+    documents = repository.list_documents(
+        limit=1000
+    )
+
+    runs = repository.list_processing_runs(
+        limit=1000
+    )
+
+    unique_documents = len(
+        documents
+    )
+
+    processing_runs = len(
+        runs
+    )
+
+    duplicate_uploads = sum(
+        1
+        for run in runs
+        if run["is_duplicate"]
+    )
+
+    pending_reviews = sum(
+        1
+        for document in documents
+        if document["review_decision"] == "pending"
+    )
+
+    # --------------------------------------------------------
+    # Dashboard metrics
+    # --------------------------------------------------------
+
+    metric1, metric2, metric3, metric4 = st.columns(4)
+
+    metric1.metric(
+        "Unique Documents",
+        unique_documents,
+    )
+
+    metric2.metric(
+        "Processing Runs",
+        processing_runs,
+    )
+
+    metric3.metric(
+        "Exact Duplicate Uploads",
+        duplicate_uploads,
+    )
+
+    metric4.metric(
+        "Pending Review Decisions",
+        pending_reviews,
+    )
+
+    # --------------------------------------------------------
+    # Document type analytics
+    # --------------------------------------------------------
+
+    if documents:
+
+        st.divider()
+
+        st.subheader(
+            "Document Type Distribution"
+        )
+
+        type_counts = {}
+
+        for document in documents:
+
+            document_type = document[
+                "document_type"
+            ]
+
+            type_counts[document_type] = (
+                type_counts.get(
+                    document_type,
+                    0,
+                ) + 1
             )
 
-            st.exception(
-                error
+        st.bar_chart(
+            type_counts
+        )
+
+        # ----------------------------------------------------
+        # Workflow analytics
+        # ----------------------------------------------------
+
+        st.subheader(
+            "Workflow Status Distribution"
+        )
+
+        status_counts = {}
+
+        for document in documents:
+
+            status = document[
+                "workflow_status"
+            ]
+
+            status_counts[status] = (
+                status_counts.get(
+                    status,
+                    0,
+                ) + 1
             )
 
+        st.bar_chart(
+            status_counts
+        )
 
-        # =====================================================
-        # TEMPORARY FILE CLEANUP
-        # =====================================================
+        # ----------------------------------------------------
+        # Review analytics
+        # ----------------------------------------------------
 
-        finally:
+        st.subheader(
+            "Review Decision Distribution"
+        )
 
-            if (
-                temporary_path is not None
-                and temporary_path.exists()
-            ):
+        review_counts = {}
 
-                temporary_path.unlink()
+        for document in documents:
+
+            review = document[
+                "review_decision"
+            ]
+
+            review_counts[review] = (
+                review_counts.get(
+                    review,
+                    0,
+                ) + 1
+            )
+
+        st.bar_chart(
+            review_counts
+        )
+
+    else:
+
+        st.info(
+            "Analytics will appear after documents "
+            "have been processed."
+        )
+
+    st.caption(
+        "These charts summarize the latest records "
+        "retrieved from SQLite, with a maximum of "
+        "1,000 records per query."
+    )
