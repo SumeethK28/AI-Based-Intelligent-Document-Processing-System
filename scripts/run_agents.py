@@ -9,6 +9,9 @@ from idp.pipeline.document_pipeline import DocumentPipeline
 import json
 from idp.storage.repository import DocumentRepository
 
+from idp.verification.cross_document import CrossDocumentVerifier
+from idp.agents.routing_agent import WorkflowRoutingAgent
+
 def main():
 
     if len(sys.argv) != 2:
@@ -97,6 +100,74 @@ def main():
     final_state = graph.invoke(
         initial_state
     )
+
+    # ====================================================
+    # CROSS-DOCUMENT VERIFICATION
+    # ====================================================
+
+    verifier = CrossDocumentVerifier(
+        repository=repository
+    )
+
+    cross_result = verifier.verify(
+        final_state
+    )
+
+    final_state.update(cross_result)
+
+    issues = cross_result["cross_document_issues"]
+
+    # Verification issues are review signals.
+    # They must affect the final workflow decision.
+
+    if issues:
+
+        final_state["anomalies"] = (
+            final_state.get("anomalies", [])
+            + issues
+        )
+
+        final_state["requires_review"] = True
+
+        final_state["risk_level"] = (
+            "medium"
+        )
+
+        # Re-evaluate routing using the updated risk/review
+        # state before storing the final document.
+        routing_agent = WorkflowRoutingAgent()
+
+        routing_result = routing_agent.run(
+            final_state
+        )
+
+        final_state.update(
+            routing_result
+        )
+
+    final_state["agent_history"] = (
+        final_state.get("agent_history", [])
+        + ["cross_document_verification"]
+    )
+
+    print("\n=== CROSS-DOCUMENT VERIFICATION ===")
+
+    print(
+        "Status:",
+        final_state["cross_document_status"]
+    )
+
+    print(
+        "Matched PO ID:",
+        final_state["matched_document_id"]
+    )
+
+    for issue in issues:
+        print(
+            f"[{issue['severity'].upper()}] "
+            f"{issue['code']}: "
+            f"{issue['description']}"
+        )
 
     saved = repository.save_processed_document(
         file_path=file_path,

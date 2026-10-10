@@ -52,6 +52,15 @@ The confidence score is a provisional estimate,
 not a measured extraction accuracy.
 
 Return valid JSON matching the schema.
+
+For purchase_order documents:
+- Extract the document's own PO number into po_number.
+
+For invoice documents:
+- If the invoice explicitly references a Purchase Order,
+  extract that identifier into po_reference.
+- Do not confuse invoice_number with po_reference.
+- Do not invent a PO reference when it is absent.
 """
 
         user_prompt = (

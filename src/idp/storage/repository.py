@@ -409,3 +409,53 @@ class DocumentRepository:
             )
 
             return cursor.rowcount > 0
+
+    def find_purchase_orders(
+        self,
+        po_number: str,
+    ) -> list[dict]:
+
+        def normalize(value: str) -> str:
+            return "".join(
+                str(value).upper().split()
+            )
+
+        target = normalize(po_number)
+
+        if not target:
+            return []
+
+        matches = []
+
+        with self.connect() as connection:
+
+            rows = connection.execute(
+                """
+                SELECT id, filename, extracted_data
+                FROM documents
+                WHERE document_type = ?
+                """,
+                ("purchase_order",),
+            ).fetchall()
+
+        for row in rows:
+
+            extracted = json.loads(
+                row["extracted_data"]
+            )
+
+            stored_number = extracted.get(
+                "po_number"
+            )
+
+            if (
+                stored_number
+                and normalize(stored_number) == target
+            ):
+                matches.append({
+                    "document_id": row["id"],
+                    "filename": row["filename"],
+                    "extracted_fields": extracted,
+                })
+
+        return matches

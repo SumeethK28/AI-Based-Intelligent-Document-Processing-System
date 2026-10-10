@@ -40,3 +40,8 @@ class DocumentState(TypedDict, total=False):
     # Execution metadata
     agent_history: list[str]
     errors: list[str]
+
+    # Cross-document verification
+    cross_document_status: str
+    cross_document_issues: list[dict[str, Any]]
+    matched_document_id: int | None

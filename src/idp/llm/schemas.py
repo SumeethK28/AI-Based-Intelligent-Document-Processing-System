@@ -45,6 +45,8 @@ class AIExtractionResult(BaseModel):
     tax: str | None = None
     total: str | None = None
 
+    po_reference: str | None = None
+
     # Evidence helps us check hallucinations later.
     field_evidence: dict[str, str] = Field(
         default_factory=dict
