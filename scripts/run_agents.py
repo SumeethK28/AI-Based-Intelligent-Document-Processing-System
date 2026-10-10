@@ -6,6 +6,8 @@ from idp.agents.graph import build_agent_graph
 from idp.ocr.rapidocr_engine import RapidOCREngine
 from idp.pipeline.document_pipeline import DocumentPipeline
 
+import json
+from idp.storage.repository import DocumentRepository
 
 def main():
 
@@ -21,6 +23,51 @@ def main():
     if not file_path.is_file():
         raise FileNotFoundError(file_path)
 
+    repository = DocumentRepository()
+    existing_document = repository.check_duplicate(
+        file_path
+    )
+
+    if existing_document is not None:
+
+        print("\n=== DUPLICATE DOCUMENT DETECTED ===")
+
+        print(
+            "Original document ID:",
+            existing_document["id"]
+        )
+
+        print(
+            "Previously detected type:",
+            existing_document["document_type"]
+        )
+
+        print(
+            "Previous workflow status:",
+            existing_document["workflow_status"]
+        )
+
+        # Record this repeat upload without rerunning Groq.
+        previous_result = json.loads(
+            existing_document["full_result"]
+        )
+
+        repeat = repository.save_processed_document(
+            file_path=file_path,
+            filename=file_path.name,
+            final_state=previous_result,
+        )
+
+        print(
+            "Duplicate processing run:",
+            repeat["run_id"]
+        )
+
+        print(
+            "No additional Groq requests were needed."
+        )
+
+        return
     # STEP 1: Run the existing baseline to obtain OCR text.
     # Existing classification/extraction may also run here,
     # but the agent graph will make its own decisions.
@@ -49,6 +96,29 @@ def main():
     # STEP 4: Execute the AI agents.
     final_state = graph.invoke(
         initial_state
+    )
+
+    saved = repository.save_processed_document(
+        file_path=file_path,
+        filename=file_path.name,
+        final_state=final_state,
+    )
+
+    print("\n=== DATABASE STORAGE ===")
+
+    print(
+        "Document ID:",
+        saved["document_id"]
+    )
+
+    print(
+        "Processing Run ID:",
+        saved["run_id"]
+    )
+
+    print(
+        "Duplicate:",
+        saved["is_duplicate"]
     )
 
     # STEP 5: Print agent results.
