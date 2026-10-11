@@ -47,7 +47,12 @@ class WorkflowRoutingAgent:
         # 2. FAILED VALIDATION
         # =============================================
 
-        elif not validation_passed or requires_review:
+        elif (
+            not validation_passed
+            or requires_review
+            or state.get("cross_document_issues")
+            or state.get("cross_document_status") in {"unmatched", "ambiguous", "mismatch", "incomplete"}
+        ):
 
             workflow_status = "manual_review"
 

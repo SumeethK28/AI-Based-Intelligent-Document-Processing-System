@@ -1,10 +1,11 @@
 
 import json
 import os
+import time
 from typing import TypeVar
 
 from dotenv import load_dotenv
-from groq import Groq
+from groq import Groq, APIConnectionError, APIStatusError
 from pydantic import BaseModel, ValidationError
 
 load_dotenv()
@@ -25,13 +26,35 @@ class GroqProvider:
         self.client = Groq(
             api_key=api_key,
             timeout=45.0,
-            max_retries=1,
+            max_retries=0,
         )
 
         self.model = os.getenv(
             "GROQ_MODEL",
             "openai/gpt-oss-120b",
         )
+
+    def _request(self, **kwargs):
+        """At most three attempts for transient failures; never retry auth/400 errors."""
+        for attempt in range(3):
+            try:
+                return self.client.chat.completions.create(**kwargs)
+            except (APIConnectionError, APIStatusError) as error:
+                if isinstance(error, APIStatusError) and error.status_code not in {408, 409, 429} and error.status_code < 500:
+                    raise
+                if attempt == 2:
+                    raise
+                delay = float(2 ** (attempt + 1))
+                response = getattr(error, "response", None)
+                if response is not None:
+                    try:
+                        delay = max(delay, float(response.headers.get("retry-after", "0")))
+                    except ValueError:
+                        pass
+                # Do not retry before a long server-requested wait expires.
+                if delay > 30:
+                    raise
+                time.sleep(delay)
 
     def generate_structured(
         self,
@@ -57,7 +80,7 @@ class GroqProvider:
         last_error = None
 
         for attempt in range(2):
-            response = self.client.chat.completions.create(
+            response = self._request(
                 model=self.model,
                 temperature=0,
                 response_format={

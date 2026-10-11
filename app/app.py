@@ -1,6 +1,7 @@
 
 import hashlib
 import json
+import os
 import tempfile
 from pathlib import Path
 
@@ -26,7 +27,7 @@ st.set_page_config(
 
 @st.cache_resource
 def get_pipeline():
-    return AgenticDocumentPipeline()
+    return AgenticDocumentPipeline(database_path=os.getenv("IDP_DATABASE_PATH", "data/idp.db"))
 
 
 pipeline = get_pipeline()
@@ -206,6 +207,10 @@ def show_processing_result(result):
         st.json(
             state.get("field_evidence", {})
         )
+
+    optional_missing = state.get("missing_optional_fields", [])
+    if optional_missing:
+        st.caption("Optional fields not extracted: " + ", ".join(format_name(field) for field in optional_missing))
 
     # --------------------------------------------------------
     # Validation
@@ -592,9 +597,13 @@ with tab_process:
                     "Document processing failed."
                 )
 
-                st.exception(
-                    error
-                )
+                status = getattr(error, "status_code", None)
+                if status == 429:
+                    st.warning("Groq usage limit reached. Wait before retrying processing.")
+                elif status in {401, 403}:
+                    st.warning("Groq authentication failed. Check the configured credentials.")
+                else:
+                    st.caption("Check the document and service availability before retrying.")
 
             finally:
 
@@ -897,7 +906,7 @@ with tab_review:
                     "rejected",
                     "needs_correction",
                 ],
-                key="review_decision_select",
+                key=f"review_decision_select_{selected_id}",
             )
 
             notes = st.text_area(
@@ -907,7 +916,7 @@ with tab_review:
                     "is being approved, rejected, "
                     "or returned for correction."
                 ),
-                key="review_notes",
+                key=f"review_notes_{selected_id}",
             )
 
             if st.button(

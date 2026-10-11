@@ -26,6 +26,7 @@ class DocumentState(TypedDict, total=False):
     validation_passed: bool
     validation_errors: list[str]
     validation_warnings: list[str]
+    missing_optional_fields: list[str]
     requires_review: bool
 
     # Anomaly Agent

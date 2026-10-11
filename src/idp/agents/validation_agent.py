@@ -5,9 +5,16 @@ from typing import Any
 
 from idp.agents.state import DocumentState
 from idp.utils.money import parse_money
-from idp.utils.evidence import normalize_evidence
+from idp.utils.evidence import normalize_evidence, normalize_ocr_text
 
 class ValidationAgent:
+
+    OPTIONAL_FIELDS = {
+        "invoice": ["tax_id", "iban", "subtotal", "tax", "po_reference"],
+        "purchase_order": ["buyer", "bill_to", "ship_to", "total"],
+        "receipt": ["receipt_number", "subtotal", "tax", "payment_method"],
+        "contract": ["contract_number", "expiration_date", "contract_value", "governing_law"],
+    }
 
     REQUIRED_FIELDS = {
         "invoice": [
@@ -47,7 +54,7 @@ class ValidationAgent:
 
     @staticmethod
     def normalize_text(value: Any) -> str:
-        return " ".join(str(value).casefold().split())
+        return normalize_ocr_text(value)
 
     @staticmethod
     def date_value(value: str):
@@ -291,6 +298,7 @@ class ValidationAgent:
         )
 
         return {
+            "missing_optional_fields": [field for field in self.OPTIONAL_FIELDS.get(document_type, []) if not fields.get(field)],
             "validation_passed": validation_passed,
             "validation_errors": errors,
             "validation_warnings": warnings,

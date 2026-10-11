@@ -2,7 +2,8 @@
 from idp.agents.state import DocumentState
 from idp.llm.provider import GroqProvider
 from idp.llm.schemas import AIExtractionResult
-from idp.utils.evidence import normalize_evidence
+from idp.utils.evidence import normalize_evidence, normalize_ocr_text
+from idp.utils.money import parse_money
 
 
 class ExtractionAgent:
@@ -16,9 +17,7 @@ class ExtractionAgent:
 
     @staticmethod
     def normalize(value: str) -> str:
-        return " ".join(
-            str(value).casefold().split()
-        )
+        return normalize_ocr_text(value)
 
     # ========================================================
     # MAIN EXTRACTION AGENT
@@ -178,6 +177,22 @@ Return the result as structured JSON.
         evidence = {key: normalize_evidence(value) for key, value in result.field_evidence.items()}
 
         fallback_used = []
+
+        # Retain explicit OCR currency for a model amount when the currency is
+        # missing and all exact numeric matches agree on one currency.
+        for field in ("subtotal", "tax", "total", "contract_value"):
+            money = parse_money(fields.get(field))
+            if money is None or money.currency is not None:
+                continue
+            candidates = []
+            for line in state.get("ocr_text", "").splitlines():
+                candidate = parse_money(line)
+                if candidate and candidate.currency and candidate.amount == money.amount:
+                    candidates.append((line.strip(), candidate.currency))
+            if candidates and len({currency for _, currency in candidates}) == 1:
+                fields[field] = candidates[0][0]
+                evidence[field] = candidates[0][0]
+                fallback_used.append(field)
 
         ocr_normalized = self.normalize(
             state.get("ocr_text", "")
