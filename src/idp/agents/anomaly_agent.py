@@ -64,7 +64,7 @@ class AnomalyDetectionAgent:
         # 2. AMOUNT ANOMALIES
         # =============================================
 
-        total_value = fields.get("total")
+        total_value = fields.get("contract_value") if document_type == "contract" else fields.get("total")
 
         if total_value:
 
@@ -90,7 +90,7 @@ class AnomalyDetectionAgent:
                         self.anomaly(
                             code="LARGE_AMOUNT",
                             description=(
-                                "Document total exceeds the "
+                                "Document amount exceeds the "
                                 "configured review threshold."
                             ),
                             severity="medium",

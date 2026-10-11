@@ -1,5 +1,6 @@
 
 from datetime import datetime
+import re
 from decimal import Decimal
 from typing import Any
 
@@ -277,6 +278,19 @@ class ValidationAgent:
                 )
 
         if document_type == "contract":
+            parties = state.get("contract_parties", [])
+            normalized_parties = [self.normalize_text(party) for party in parties]
+            selected = [self.normalize_text(fields.get(role) or "") for role in ("party_a", "party_b")]
+            if (len(parties) != 2 or len(set(normalized_parties)) != 2
+                    or set(normalized_parties) != set(selected)
+                    or any(party not in normalized_ocr for party in normalized_parties)):
+                errors.append("Contract requires a complete, OCR-supported list of exactly two distinct parties.")
+            if state.get("unsupported_contract_reasons"):
+                errors.append("Unsupported contract structure requires manual review.")
+            if re.search(r"\b(?:amendment|addendum)\b", str(fields.get("contract_title") or ""), re.I):
+                errors.append("Contract amendment/addendum requires the underlying agreement and manual review.")
+            if re.search(r"\bparty\s*(?:c|3|three)\s*[:(]|\bthird\s+party\s*:", ocr_text, re.I):
+                errors.append("Additional contracting party cannot be represented by the two-party schema.")
             party_a = self.normalize_text(fields.get("party_a") or "")
             party_b = self.normalize_text(fields.get("party_b") or "")
             if party_a and party_a == party_b:

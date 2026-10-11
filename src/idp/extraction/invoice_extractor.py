@@ -31,6 +31,7 @@ class InvoiceExtractor:
         if client is None:
             client = self._extract_value_after_label(lines, "client:")
 
+        seller_tax = self._seller_tax_from_layout(regions or [], seller)
         return InvoiceData(
             invoice_number=self._extract_invoice_number(
                 text
@@ -40,9 +41,8 @@ class InvoiceExtractor:
             ),
             seller=seller,
             client=client,
-            tax_id=self._extract_tax_id(
-                text
-            ),
+            tax_id=seller_tax[0] if seller_tax else None,
+            seller_tax_id_evidence=seller_tax[1] if seller_tax else None,
             iban=self._extract_iban(
                 text
             ),
@@ -50,6 +50,42 @@ class InvoiceExtractor:
                 lines
             ),
         )
+
+    @staticmethod
+    def _seller_tax_from_layout(regions: list[OCRRegion], seller: str | None):
+        """Certify only a unique tax ID in an explicit two-column party block.
+
+        Text order is not role evidence. Ambiguous/stacked/multi-page layouts
+        intentionally produce no fallback rather than guessing a seller ID.
+        """
+        def bounds(region):
+            box = region.bounding_box
+            return min(p[0] for p in box), min(p[1] for p in box), max(p[0] for p in box), max(p[1] for p in box)
+
+        labels = {role: [r for r in regions if r.text.strip().casefold() == role + ":"] for role in ("seller", "client")}
+        if not seller or any(len(items) != 1 for items in labels.values()):
+            return None
+        seller_label, client_label = labels["seller"][0], labels["client"][0]
+        sl, st, sr, sb = bounds(seller_label)
+        cl, ct, cr, cb = bounds(client_label)
+        sx, cx = (sl + sr) / 2, (cl + cr) / 2
+        if abs(st - ct) > 40 or abs(sx - cx) < 100:
+            return None
+        boundary = (sx + cx) / 2
+
+        def seller_column(region):
+            left, _, right, _ = bounds(region)
+            return right < boundary - 20 if sx < cx else left > boundary + 20
+
+        names = [r for r in regions if r.text.strip() == seller and seller_column(r) and 0 <= bounds(r)[1] - sb <= 150]
+        if len(names) != 1:
+            return None
+        candidates = []
+        for region in regions:
+            match = re.fullmatch(r"tax\s*(?:id|ld)\s*[:#]\s*([A-Za-z0-9-]+)", region.text.strip(), re.I)
+            if match and seller_column(region) and bounds(names[0])[3] <= bounds(region)[1] <= sb + 250:
+                candidates.append((match.group(1), "\n".join((seller_label.text, names[0].text, region.text))))
+        return candidates[0] if len(candidates) == 1 else None
 
     def _extract_party_from_layout(self, regions: list[OCRRegion], label: str) -> str | None:
 

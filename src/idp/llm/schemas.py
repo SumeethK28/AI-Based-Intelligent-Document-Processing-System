@@ -56,6 +56,8 @@ class AIExtractionResult(BaseModel):
     expiration_date: str | None = None
     contract_value: str | None = None
     governing_law: str | None = None
+    contract_parties: list[str] = Field(default_factory=list)
+    unsupported_contract_reasons: list[str] = Field(default_factory=list)
 
     # Evidence helps us check hallucinations later.
     field_evidence: dict[str, str] = Field(

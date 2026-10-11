@@ -21,7 +21,8 @@ class FakeLLM:
         self.calls += 1
         if response_model is AIClassificationResult:
             return response_model(document_type=self.kind, confidence=1)
-        return AIExtractionResult(**self.fields, confidence=1, field_evidence=self.fields)
+        return AIExtractionResult(**self.fields, confidence=1, field_evidence=self.fields,
+                                  contract_parties=[self.fields[role] for role in ("party_a", "party_b") if self.fields.get(role)])
 
 
 class PipelineFixture(unittest.TestCase):

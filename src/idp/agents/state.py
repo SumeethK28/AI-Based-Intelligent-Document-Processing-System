@@ -21,6 +21,8 @@ class DocumentState(TypedDict, total=False):
     extraction_confidence: float
     field_evidence: dict[str, str]
     evidence_warnings: list[str]
+    contract_parties: list[str]
+    unsupported_contract_reasons: list[str]
 
     # Validation Agent
     validation_passed: bool

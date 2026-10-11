@@ -1,4 +1,6 @@
 
+import re
+
 from idp.agents.state import DocumentState
 from idp.llm.provider import GroqProvider
 from idp.llm.schemas import AIExtractionResult
@@ -90,6 +92,8 @@ Extract:
 - po_reference, if explicitly mentioned
 
 Important invoice terminology:
+- tax_id is the seller's tax ID, never the client's. If flattened OCR
+  does not establish the role, leave it null; layout fallback may resolve it.
 - Net worth = subtotal
 - VAT amount = tax
 - Gross worth = total
@@ -131,8 +135,12 @@ Extract contract_title, contract_number, party_a, party_b,
 effective_date, expiration_date, contract_value and governing_law.
 Preserve party names and dates exactly as written. Do not infer
 signatures, legal enforceability, dates or amounts from general terms.
-For agreements with more than two parties, capture the first two
-and retain the complete party clause as evidence.
+Return contract_parties containing ALL named contracting parties verbatim.
+For agreements with more than two parties, capture the first two fields
+but mark unsupported_contract_reasons: the schema supports only two parties.
+Also report unsupported_contract_reasons for amendments that depend on
+another agreement or terms that cannot be represented by this schema.
+Missing explicit effective dates must remain null, never inferred.
 Extract only fields supported by the schema.
 Do not fabricate contractual information.
 
@@ -165,6 +173,8 @@ Return the result as structured JSON.
                 key not in {
                     "field_evidence",
                     "confidence",
+                    "contract_parties",
+                    "unsupported_contract_reasons",
                 }
                 and value is not None
                 and str(value).strip()
@@ -177,6 +187,20 @@ Return the result as structured JSON.
         evidence = {key: normalize_evidence(value) for key, value in result.field_evidence.items()}
 
         fallback_used = []
+
+        contract_parties = list(result.contract_parties)
+        unsupported_contract_reasons = list(result.unsupported_contract_reasons)
+        if document_type == "contract":
+            # Preserve explicit named roles even when the model truncates its
+            # party list to the two scalar fields supported by the schema.
+            for line in state.get("ocr_text", "").splitlines():
+                match = re.fullmatch(r"\s*Party\s+[A-Z0-9]+\s*:\s*(\S.*?)\s*", line, re.I)
+                if match and self.normalize(match.group(1)) not in {self.normalize(p) for p in contract_parties}:
+                    contract_parties.append(match.group(1))
+                    if "contract_parties" not in fallback_used:
+                        fallback_used.append("contract_parties")
+            if len(contract_parties) > 2:
+                unsupported_contract_reasons.append("More than two explicitly named contracting parties.")
 
         # Retain explicit OCR currency for a model amount when the currency is
         # missing and all exact numeric matches agree on one currency.
@@ -219,6 +243,17 @@ Return the result as structured JSON.
             document_type == "invoice"
             and baseline_document_type == "invoice"
         ):
+
+            candidate = fallback_fields.get("tax_id")
+            role_evidence = fallback_fields.get("seller_tax_id_evidence")
+            baseline_seller = fallback_fields.get("seller")
+            if (not fields.get("tax_id") and candidate and role_evidence and baseline_seller
+                    and self.normalize(fields.get("seller") or baseline_seller) == self.normalize(baseline_seller)
+                    and self.normalize(candidate) in ocr_normalized
+                    and all(self.normalize(part) in ocr_normalized for part in role_evidence.splitlines())):
+                fields["tax_id"] = candidate
+                evidence["tax_id"] = role_evidence
+                fallback_used.append("tax_id")
 
             for field in (
                 "seller",
@@ -357,6 +392,8 @@ Return the result as structured JSON.
         # =============================================
 
         return {
+            "contract_parties": contract_parties,
+            "unsupported_contract_reasons": unsupported_contract_reasons,
             "extracted_fields": fields,
             "extraction_confidence": result.confidence,
             "field_evidence": evidence,

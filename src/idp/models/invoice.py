@@ -10,3 +10,4 @@ class InvoiceData:
     tax_id: str | None = None
     iban: str | None = None
     total: str | None = None
+    seller_tax_id_evidence: str | None = None

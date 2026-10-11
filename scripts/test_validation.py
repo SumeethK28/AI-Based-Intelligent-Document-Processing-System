@@ -10,7 +10,74 @@ from idp.validation.purchase_order_validator import PurchaseOrderValidator
 class ValidationTests(unittest.TestCase):
     def validate(self, fields, kind="invoice"):
         return ValidationAgent().run({"document_type": kind, "extracted_fields": fields,
-                                      "ocr_text": "\n".join(fields.values()), "field_evidence": fields})
+                                      "ocr_text": "\n".join(fields.values()), "field_evidence": fields,
+                                      "contract_parties": [fields[role] for role in ("party_a", "party_b") if fields.get(role)]})
+
+    def test_contract_incomplete_and_unsupported_structure(self):
+        fields = {"contract_title": "Agreement", "party_a": "Acme", "party_b": "Buyer", "effective_date": "2026-10-10"}
+        state = {"document_type": "contract", "extracted_fields": fields,
+                 "ocr_text": "\n".join(fields.values()), "field_evidence": fields}
+        self.assertFalse(ValidationAgent().run(state)["validation_passed"])
+        state["contract_parties"] = ["Acme", "Buyer", "Third Company"]
+        self.assertFalse(ValidationAgent().run(state)["validation_passed"])
+        state["contract_parties"] = ["Acme", "Buyer"]
+        state["unsupported_contract_reasons"] = ["Amendment depends on unavailable agreement"]
+        self.assertFalse(ValidationAgent().run(state)["validation_passed"])
+        state["unsupported_contract_reasons"] = []
+        state["ocr_text"] += "\nParty C: Third Company"
+        self.assertFalse(ValidationAgent().run(state)["validation_passed"])
+
+    def test_explicit_third_contract_party_is_preserved(self):
+        from unittest.mock import Mock
+        from idp.agents.extraction_agent import ExtractionAgent
+        from idp.llm.schemas import AIExtractionResult
+        fields = {"contract_title": "Services Agreement", "party_a": "Acme", "party_b": "Buyer", "effective_date": "2026-10-10"}
+        llm = Mock()
+        llm.generate_structured.return_value = AIExtractionResult(**fields, confidence=1, field_evidence=fields, contract_parties=["Acme", "Buyer"])
+        state = {"document_type": "contract", "ocr_text": "\n".join(fields.values()) + "\nParty C: Third Company"}
+        result = ExtractionAgent(llm).run(state)
+        self.assertEqual(result["contract_parties"], ["Acme", "Buyer", "Third Company"])
+        self.assertFalse(ValidationAgent().run({**state, **result})["validation_passed"])
+        result["contract_parties"] = ["Acme", "Buyer"]
+        result["unsupported_contract_reasons"] = []
+        state["ocr_text"] = "\n".join(fields.values()) + "\nAmendment"
+        result["extracted_fields"]["contract_title"] = "Amendment"
+        self.assertFalse(ValidationAgent().run({**state, **result})["validation_passed"])
+
+    def test_seller_tax_id_uses_layout_not_text_order(self):
+        from dataclasses import asdict
+        from unittest.mock import Mock
+        from idp.extraction.invoice_extractor import InvoiceExtractor
+        from idp.models.ocr import OCRRegion
+        from idp.agents.extraction_agent import ExtractionAgent
+        from idp.llm.schemas import AIExtractionResult
+        def region(text, x, y, width=150):
+            return OCRRegion(text, 1, [[x, y], [x + width, y], [x + width, y + 20], [x, y + 20]])
+        # Seller is on the right, and the client's ID occurs first in OCR.
+        regions = [region("Client:", 10, 10), region("Seller:", 500, 10),
+                   region("Buyer LLC", 10, 40), region("Acme Ltd", 500, 40),
+                   region("Tax Id: 901-88-0463", 10, 100), region("Tax Id: 909-83-7738", 500, 100)]
+        text = "\n".join(r.text for r in regions)
+        baseline = asdict(InvoiceExtractor().extract(text, regions))
+        self.assertEqual(baseline["tax_id"], "909-83-7738")
+        llm = Mock()
+        llm.generate_structured.return_value = AIExtractionResult(confidence=1, seller="Acme Ltd", total="118.00",
+                                                                 field_evidence={"seller": "Acme Ltd", "total": "118.00"})
+        state = {"document_type": "invoice", "baseline_document_type": "invoice", "baseline_fields": {**baseline, "total": "999.00"}, "ocr_text": text + "\n118.00"}
+        result = ExtractionAgent(llm).run(state)
+        self.assertEqual(result["extracted_fields"]["tax_id"], "909-83-7738")
+        self.assertEqual(result["extracted_fields"]["total"], "118.00")
+        self.assertIn("Seller:", result["field_evidence"]["tax_id"])
+        self.assertEqual(result["evidence_warnings"], [])
+        llm.generate_structured.return_value.tax_id = "909-83-7738"
+        self.assertNotIn("tax_id", ExtractionAgent(llm).run(state)["fallback_used"])
+        llm.generate_structured.return_value.tax_id = None
+        for ambiguous in ([], regions + [region("Tax Id: OTHER-ID", 500, 130)], regions + [region("Seller:", 500, 10)]):
+            state["baseline_fields"] = asdict(InvoiceExtractor().extract(text, ambiguous))
+            self.assertNotIn("tax_id", ExtractionAgent(llm).run(state)["extracted_fields"])
+        state["baseline_fields"] = baseline
+        llm.generate_structured.return_value.seller = "Buyer LLC"
+        self.assertNotIn("tax_id", ExtractionAgent(llm).run(state)["extracted_fields"])
 
     def test_invoice_arithmetic_and_invalid_date(self):
         fields = {"invoice_number": "INV-1", "issue_date": "2026-10-10", "seller": "Acme", "client": "Buyer",

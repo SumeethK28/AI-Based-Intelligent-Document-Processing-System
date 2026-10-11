@@ -10,6 +10,18 @@ from idp.llm.provider import GroqProvider
 from idp.pipeline.agentic_pipeline import AgenticDocumentPipeline
 from idp.utils.money import parse_money
 from idp.agents.validation_agent import ValidationAgent
+from idp.llm.schemas import AIExtractionResult
+
+
+class RecordingGroqProvider(GroqProvider):
+    """Record parsed live extraction before evidence/layout fallbacks."""
+    last_extraction = None
+
+    def generate_structured(self, *args, **kwargs):
+        result = super().generate_structured(*args, **kwargs)
+        if isinstance(result, AIExtractionResult):
+            self.last_extraction = result.model_dump()
+        return result
 
 
 GROUND_TRUTH = {
@@ -26,7 +38,7 @@ def main():
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     output = Path("results") / ("evaluation_" + stamp)
     output.mkdir(parents=True)
-    provider = GroqProvider()
+    provider = RecordingGroqProvider()
     pipeline = AgenticDocumentPipeline(output / "evaluation.db", llm=provider)
     report = {"python": platform.python_version(), "model": provider.model, "started_at_utc": stamp,
               "conditions": "Real RapidOCR + Groq, new isolated SQLite DB, PO first, serial processing, no mocks. Timings include OCR/API/retries/SQLite and exclude construction and inter-document pacing.",
@@ -45,6 +57,7 @@ def main():
             entry["seconds"] = time.perf_counter() - started
             state = result["state"]
             entry["state"] = state
+            entry["raw_model_extraction"] = provider.last_extraction
             entry["completed"] = True
             entry["classification_correct"] = state["document_type"] == kind
             entry["cross_document_correct"] = state["cross_document_status"] == cross
