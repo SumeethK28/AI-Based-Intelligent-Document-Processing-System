@@ -55,7 +55,7 @@ class IntegrationTests(unittest.TestCase):
         duplicate = self.pipeline.process(self.root / "invoice.txt")
         self.assertTrue(duplicate["duplicate"])
         self.assertEqual(self.llm.calls, calls)
-        self.pipeline.repository.update_review(result["document_id"], "approved")
+        self.pipeline.repository.update_review(result["document_id"], "approved",'Simulated verified review',expected_revision=self.pipeline.repository.get_document(result['document_id'])['revision'])
         self.llm.fields = {**invoice, "total": "INR 120.00"}
         updated = self.pipeline.process(self.root / "invoice.txt", force_reprocess=True)
         self.assertTrue(updated["reprocessed"])
@@ -158,7 +158,7 @@ class IntegrationTests(unittest.TestCase):
         from streamlit.testing.v1 import AppTest
         self.process("ui.txt", "receipt", {"seller": "Shop", "issue_date": "2026-10-01", "total": "INR 20.00"})
         with patch.dict("os.environ", {"IDP_DATABASE_PATH": str(self.pipeline.repository.db_path)}), patch("idp.pipeline.agentic_pipeline.AgenticDocumentPipeline", return_value=self.pipeline):
-            app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app/app.py")).run(timeout=30)
+            app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app/app.py"), default_timeout=30).run(timeout=30)
             self.assertEqual(len(app.exception), 0)
             self.assertEqual(len(app.radio(key="navigation").options), 9)
             self.assertGreater(len(app.selectbox), 0)

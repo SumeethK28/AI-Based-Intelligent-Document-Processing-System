@@ -17,6 +17,8 @@ class DocumentRepository:
         self.initialize_database()
         from idp.storage.migrations import migrate
         migrate(self)
+        from idp.storage.review_migration import migrate_review
+        migrate_review(self)
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -156,6 +158,9 @@ class DocumentRepository:
             )
             run_id = run_cursor.lastrowid
             connection.execute('UPDATE processing_runs SET operation_key=?,result_snapshot=? WHERE id=?', (operation_key, result_json, run_id))
+            if not is_duplicate:
+                from idp.storage.review_migration import capture_version
+                capture_version(self,connection,document_id,run_id,final_state,'model_result')
 
         return {
             "document_id": document_id,
@@ -187,7 +192,7 @@ class DocumentRepository:
                 if prior:
                     return {'document_id':prior['document_id'], 'run_id':prior['id'], 'file_hash':file_hash, 'is_duplicate':False, 'reprocessed':True}
             existing = connection.execute(
-                "SELECT id FROM documents WHERE file_hash = ?", (file_hash,)
+                "SELECT * FROM documents WHERE file_hash = ?", (file_hash,)
             ).fetchone()
             if existing is None:
                 raise ValueError("Cannot reprocess: document not found in SQLite.")
@@ -223,6 +228,17 @@ class DocumentRepository:
             )
             run_id = run_cursor.lastrowid
             connection.execute('UPDATE processing_runs SET operation_key=?,result_snapshot=? WHERE id=?', (operation_key, result_json, run_id))
+            from idp.storage.review_migration import capture_version
+            from idp.review.service import ReviewService
+            version = capture_version(self,connection,document_id,run_id,final_state,'reprocessed_model_result')
+            before = dict(existing)
+            before['processing_version_id']=version
+            ReviewService(self).event(connection,before,'reprocessed',
+                {'decision':existing['review_decision'],'processing_version_id':existing['processing_version_id']},
+                {'decision':'pending','processing_version_id':version},'system:processing',
+                'Explicit forced reprocessing replaced the current result and reopened review.',state=final_state)
+            if final_state.get('document_type')=='purchase_order':
+                ReviewService(self).invalidate_dependents(connection,document_id,'Referenced PO was reprocessed; fresh invoice review is required.')
 
         return {
             "document_id": document_id,
@@ -268,20 +284,15 @@ class DocumentRepository:
         return document
 
     def update_review(
-        self, document_id: int, decision: str, notes: str = ""
+        self, document_id: int, decision: str, notes: str = "", *, expected_revision: int | None = None
     ) -> bool:
         if decision not in {"approved", "rejected", "needs_correction"}:
             raise ValueError("Invalid review decision.")
-        with self.connect() as connection:
-            cursor = connection.execute(
-                """
-                UPDATE documents
-                SET review_decision = ?, review_notes = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (decision, notes, self.timestamp(), document_id),
-            )
-            return cursor.rowcount > 0
+        if self.get_document(document_id) is None:
+            return False
+        from idp.review.service import ReviewService
+        ReviewService(self).decide(document_id,expected_revision,decision,actor='prototype:compatibility-api',reason=notes,notes=notes)
+        return True
 
     def find_purchase_orders(self, po_number: str) -> list[dict[str, Any]]:
         """Return all stored POs with the same normalized PO identifier."""

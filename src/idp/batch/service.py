@@ -213,6 +213,8 @@ class BatchService:
                 continue
             seen.add(item['document_id'])
             document = self.repository.get_document(item['document_id'])
+            if document['review_decision'] in {'rejected','needs_correction','escalated'}:
+                continue  # Batch reconciliation cannot overturn an explicit human restriction.
             state = document['full_result']
             if state.get('document_type') != 'invoice' or not state.get('extracted_fields',{}).get('po_reference'):
                 continue
@@ -237,6 +239,11 @@ class BatchService:
                     (encoded,state['workflow_status'],state['assigned_department'],self.repository.timestamp(),document['id'],json.dumps(document['full_result'],ensure_ascii=False)))
                 if not changed.rowcount:
                     continue
+                from idp.review.service import ReviewService
+                ReviewService(self.repository).event(db,document,'batch_reconciliation',
+                    {'cross_document_status':document['full_result'].get('cross_document_status'),'workflow_status':document['workflow_status']},
+                    {'cross_document_status':state['cross_document_status'],'workflow_status':state['workflow_status']},
+                    'system:batch-worker','Post-batch purchase-order reconciliation refreshed deterministic checks.',state=state)
                 db.execute('''UPDATE batch_items SET result_snapshot=?,state=CASE WHEN state='duplicate' THEN state ELSE ? END
                     WHERE batch_id=? AND document_id=? AND state!='failed' ''',
                     (encoded,'completed' if state['workflow_status']=='pending_department_review' else 'review_required',batch_id,document['id']))

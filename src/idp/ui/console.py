@@ -126,11 +126,13 @@ def document_detail(repository, document, prefix, *, run_id="latest", duplicate=
     st.markdown("#### Extracted information")
     st.caption("Formula-like text is escaped in table/CSV views. Original values are preserved in JSON.")
     if fields:
-        record_table([{"field": friendly(field), "value": value, "source": "Verified OCR/layout fallback" if field in state.get("fallback_used", []) else "AI extraction"} for field, value in fields.items()])
+        record_table([{"field": friendly(field), "value": value, "source": "Not extracted / omitted" if not value else "Human correction (prototype operator)" if state.get('field_provenance',{}).get(field,{}).get('source')=='human_correction' else "Verified OCR/layout fallback" if field in state.get("fallback_used", []) else "AI extraction"} for field, value in fields.items()])
     else:
         st.info("No structured fields were extracted.")
     with st.expander("Field Evidence"):
         st.json(state.get("field_evidence", {}))
+        if state.get('field_provenance'):
+            st.json(state['field_provenance'])
         if state.get("contract_parties"):
             st.write("Named contracting parties:", state["contract_parties"])
         issues(state.get("unsupported_contract_reasons", []))
@@ -290,19 +292,6 @@ def browse(queries, repository, selection, prefix, *, review=False):
     st.caption("Review decision: " + friendly(document["review_decision"]))
     if document.get("review_notes"):
         st.write("Recorded review notes:", document["review_notes"])
-    if review:
-        st.markdown("#### Record a review decision")
-        st.caption("Local prototype: records judgement only, not payment or legal authorization. Actor authentication, corrections and immutable history are planned for Milestone 4/6.")
-        decision = st.selectbox("Review Decision", ["approved", "rejected", "needs_correction"], format_func=friendly, key=f"review_decision_select_{selected}")
-        notes = st.text_area("Review Notes", key=f"review_notes_{selected}", placeholder="Explain the decision and unresolved concerns.")
-        if st.button("Save Review Decision", type="primary"):
-            if not notes.strip():
-                st.warning("Please provide review notes.")
-            elif repository.update_review(selected, decision, notes.strip()):
-                st.session_state["review_saved"] = True
-                st.rerun()
-            else:
-                st.error("The review could not be saved. Refresh and try again.")
 
 
 def analytics(queries):
@@ -370,20 +359,11 @@ def main():
     elif page == "Document Repository":
         browse(queries, repository, filters_ui(queries, "repository", search=True), "repository")
     elif page == "Review Center":
-        if st.session_state.pop("review_saved", False):
-            st.success("Review decision saved.")
-        selection = filters_ui(queries, "review")
-        if selection.review_decision not in {"", "pending"}:
-            st.info("Review Center shows pending decisions. Recorded decisions are in Document Repository.")
-        browse(queries, repository, replace(selection, review_decision="pending"), "review", review=True)
+        from idp.ui.review_workspace import workspace
+        workspace(repository)
     elif page == "Department Workspaces":
-        options = queries.options()["department"]
-        if not options:
-            st.info("Routed queues will appear after documents are processed.")
-        else:
-            department = st.selectbox("Team", options, key="workspace_department")
-            pending = st.checkbox("Awaiting decision only", value=True, key="workspace_pending")
-            browse(queries, repository, DocumentFilters(department=department, review_decision="pending" if pending else ""), "workspace")
+        from idp.ui.review_workspace import workspace
+        workspace(repository,department=True)
     elif page == "Business Analytics":
         analytics(queries)
     elif page == "Business Rules":
@@ -392,7 +372,7 @@ def main():
         st.subheader("Processing and data handling")
         st.write("OCR runs locally. Document text is sent to Groq. SQLite stores recognized text, fields and current decisions. Single uploads are temporary; batch sources are retained locally and eligible for explicit cleanup after 30 days.")
         st.write("Classification, extraction, validation, anomalies and purchase orders are checked before routing. Confidence values are reported scores, not calibrated accuracy.")
-        st.info("Local prototype: no authentication, role enforcement, immutable review audit, retention deletion workflow or compliance certification. Department selection does not restrict access.")
+        st.info("Local prototype: review events and processing originals are append-only during normal operations. There is no authentication, role enforcement, cryptographic tamper protection, retention deletion workflow or compliance certification. Team assignment does not restrict access.")
         st.caption("Configured model: " + os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"))
         st.caption("Credentials are never displayed. Transient provider retries are bounded; invalid credentials are not repeatedly retried.")
         record_table(queries.overview()["activity"])

@@ -148,7 +148,7 @@ with worker_lock(repo.db_path):
         job = self.submit('receipt')
         self.run_job(job)
         with patch.dict('os.environ',{'IDP_DATABASE_PATH':str(self.repo.db_path)}),patch('idp.ui.console.get_pipeline',return_value=self.pipeline):
-            app = AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app/app.py')).run(timeout=30)
+            app = AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app/app.py'), default_timeout=30).run(timeout=30)
             app.radio(key='navigation').set_value('Bulk Processing').run()
             self.assertEqual(app.metric[3].value,'1')
             next(button for button in app.button if button.label=='Retry failed item').click().run()
@@ -199,6 +199,18 @@ with worker_lock(repo.db_path):
         self.assertEqual(json.loads(invoice['result_snapshot'])['cross_document_status'],'ambiguous')
         self.assertEqual(self.repo.get_document(invoice['document_id'])['workflow_status'],'manual_review')
 
+    def test_batch_reconciliation_cannot_overturn_human_escalation(self):
+        from idp.review.service import ReviewService
+        job=self.submit('invoice','po')
+        self.run_job(job,max_items=1)
+        item=self.service.items(job)[0]
+        document=self.repo.get_document(item['document_id'])
+        ReviewService(self.repo).decide(document['id'],document['revision'],'escalated',actor='prototype:reviewer',reason='Check PO source before further processing')
+        self.run_job(job)
+        after=self.repo.get_document(document['id'])
+        self.assertEqual(after['review_decision'],'escalated')
+        self.assertEqual(after['workflow_status'],'manual_review')
+
     def test_repeated_submission_and_concurrent_requests(self):
         files = [('receipt.pdf',pdf('receipt'))]
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -228,7 +240,7 @@ with worker_lock(repo.db_path):
         first = self.service.submit([('receipt.pdf',data)],request_key='first')
         self.run_job(first)
         document_id = self.service.items(first)[0]['document_id']
-        self.repo.update_review(document_id,'approved','Review')
+        self.repo.update_review(document_id,'approved','Review',expected_revision=self.repo.get_document(document_id)['revision'])
         job = self.service.submit([('receipt.pdf',data)],request_key='forced',force=True)
         self.run_job(job)
         self.assertEqual(self.repo.get_document(document_id)['review_decision'],'pending')
@@ -309,7 +321,7 @@ with worker_lock(repo.db_path):
             db.commit()
         repository = DocumentRepository(legacy)
         with repository.connect() as db:
-            self.assertEqual(tuple(db.execute('SELECT * FROM documents').fetchone()),before)
+            self.assertEqual(tuple(db.execute('SELECT * FROM documents').fetchone())[:len(before)],before)
             self.assertEqual(db.execute('PRAGMA foreign_key_check').fetchall(),[])
         self.assertEqual(len(list(self.root.glob('legacy.db.before_batch_v1.*.db'))),1)
         DocumentRepository(legacy)

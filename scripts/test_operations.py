@@ -32,13 +32,15 @@ class OperationsTests(PipelineFixture):
 
     def test_currency_and_review_categories_stay_separate(self):
         approved = self.invoice("INV-1")
-        self.pipeline.repository.update_review(approved["document_id"], "approved")
+        self.pipeline.repository.update_review(approved["document_id"], "approved",'Verified fixture',expected_revision=self.pipeline.repository.get_document(approved['document_id'])['revision'])
         self.invoice("INV-2", "INR 100.00")
         rejected = self.invoice("INV-3", "EUR 30.00")
-        self.pipeline.repository.update_review(rejected["document_id"], "rejected")
+        self.pipeline.repository.update_review(rejected["document_id"], "rejected",'Rejected fixture',expected_revision=self.pipeline.repository.get_document(rejected['document_id'])['revision'])
         self.invoice("INV-4", "40.00")
         unsafe = self.process("INV-5", "invoice", {"invoice_number": "INV-5", "issue_date": "2026-10-01", "seller": "Supplier", "client": "Client", "total": "USD 50.00", "po_reference": "PO-missing"})
-        self.pipeline.repository.update_review(unsafe["document_id"], "approved")
+        # Simulate an existing legacy unsafe approval; the new API must block creating it.
+        with self.pipeline.repository.connect() as db:
+            db.execute("UPDATE documents SET review_decision='approved' WHERE id=?",(unsafe['document_id'],))
         data = OperationsQueries(self.pipeline.repository).overview()
         groups = {(row["currency"], row["category"]): row["extracted_value"] for row in data["invoice_values"]}
         self.assertEqual(groups[("USD", "Review approved")], "20.00")

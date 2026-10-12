@@ -33,7 +33,7 @@ class StorageTests(unittest.TestCase):
 
     def test_reprocessing_resets_review(self):
         saved = self.save()
-        self.assertTrue(self.repository.update_review(saved["document_id"], "approved", "checked"))
+        self.assertTrue(self.repository.update_review(saved["document_id"], "rejected", "Incomplete source checked",expected_revision=self.repository.get_document(saved['document_id'])['revision']))
         updated = {**self.state, "extracted_fields": {"total": "INR 50.00"}}
         result = self.repository.save_reprocessed_document(self.document, "renamed.txt", updated)
         stored = self.repository.get_document(result["document_id"])

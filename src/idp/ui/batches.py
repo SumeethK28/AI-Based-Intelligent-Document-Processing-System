@@ -100,12 +100,12 @@ def bulk_page(repository, pipeline_factory, record_table):
     st.caption('Retained sources stay local beside this database. They are eligible for explicit cleanup after 30 days; no automatic deletion occurs. Protect this local folder with your account permissions. This prototype does not add authentication or encryption.')
 
 
-def retained_details(repository, document_id, record_table):
+def retained_details(repository, document_id, record_table, *, expanded=False):
     service = BatchService(repository)
     with repository.connect() as db:
         items = [dict(row) for row in db.execute('''SELECT i.*,b.name AS batch_name FROM batch_items i
             JOIN batch_jobs b ON b.id=i.batch_id WHERE i.document_id=? ORDER BY i.id DESC''',(document_id,))]
-    with st.expander('Batch membership and retained source'):
+    with st.expander('Batch membership and retained source',expanded=expanded):
         if not items:
             st.caption('No retained batch source exists for this legacy or single-document upload.')
             return

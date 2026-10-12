@@ -42,7 +42,7 @@ class PipelineTests(PipelineFixture):
             duplicate = self.pipeline.process(self.root / "invoice.txt")
             self.assertTrue(duplicate["duplicate"])
             self.assertEqual(self.llm.calls, calls)
-            self.pipeline.repository.update_review(result["document_id"], "approved")
+            self.pipeline.repository.update_review(result["document_id"], "approved",'Simulated verified review',expected_revision=self.pipeline.repository.get_document(result['document_id'])['revision'])
             self.llm.fields = {**invoice, "total": "INR 120.00"}
             updated = self.pipeline.process(self.root / "invoice.txt", force_reprocess=True)
             self.assertTrue(updated["reprocessed"])
