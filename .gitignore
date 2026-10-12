@@ -125,3 +125,5 @@ desktop.ini
 /tmp/
 /temp/
 *.tmp
+*.worker.lock
+**/batch_sources/

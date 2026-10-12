@@ -35,6 +35,7 @@ class AgenticDocumentPipeline:
         file_path: str | Path,
         original_filename: str | None = None,
         force_reprocess: bool = False,
+        operation_key: str | None = None,
     ) -> dict[str, Any]:
 
         path = Path(file_path)
@@ -42,6 +43,17 @@ class AgenticDocumentPipeline:
 
         if not path.is_file():
             raise FileNotFoundError(path)
+        if operation_key:
+            import json
+            with self.repository.connect() as db:
+                prior = db.execute('SELECT * FROM processing_runs WHERE operation_key=?', (operation_key,)).fetchone()
+            if prior:
+                document = self.repository.get_document(prior['document_id'])
+                if document['file_hash'] != self.repository.calculate_hash(path):
+                    raise ValueError('Processing identifier belongs to a different source.')
+                return {'duplicate':bool(prior['is_duplicate']), 'reprocessed':force_reprocess,
+                        'document_id':prior['document_id'], 'run_id':prior['id'],
+                        'state':json.loads(prior['result_snapshot']), 'message':'Recovered committed processing result.'}
 
         # =============================================
         # STEP 1: CHECK FOR EXACT DUPLICATES
@@ -68,6 +80,7 @@ class AgenticDocumentPipeline:
                 file_path=path,
                 filename=filename,
                 final_state=previous_state,
+                operation_key=operation_key,
             )
 
             return {
@@ -151,6 +164,7 @@ class AgenticDocumentPipeline:
                     file_path=path,
                     filename=filename,
                     final_state=state,
+                    operation_key=operation_key,
                 )
             )
 
@@ -168,6 +182,7 @@ class AgenticDocumentPipeline:
                     file_path=path,
                     filename=filename,
                     final_state=state,
+                    operation_key=operation_key,
                 )
             )
 

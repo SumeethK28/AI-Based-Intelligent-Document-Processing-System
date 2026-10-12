@@ -15,11 +15,19 @@ class DocumentRepository:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.initialize_database()
+        from idp.storage.migrations import migrate
+        migrate(self)
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
         """Commit/rollback and always close the SQLite connection (Windows-safe)."""
         connection = sqlite3.connect(self.db_path, timeout=10)
+        from idp.utils.money import parse_money
+        def money(data):
+            fields = json.loads(data)
+            return parse_money(fields.get('total') or fields.get('contract_value'))
+        connection.create_function('idp_amount', 1, lambda data: float(value.amount) if (value := money(data)) else None)
+        connection.create_function('idp_currency', 1, lambda data: value.currency if (value := money(data)) else None)
         try:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")
@@ -95,6 +103,7 @@ class DocumentRepository:
         file_path: str | Path,
         filename: str,
         final_state: dict[str, Any],
+        operation_key: str | None = None,
     ) -> dict[str, Any]:
         """Create a unique document or record an exact duplicate upload."""
         file_hash = self.calculate_hash(file_path)
@@ -103,6 +112,10 @@ class DocumentRepository:
 
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if operation_key:
+                prior = connection.execute('SELECT id,document_id,is_duplicate FROM processing_runs WHERE operation_key=?', (operation_key,)).fetchone()
+                if prior:
+                    return {'document_id':prior['document_id'], 'run_id':prior['id'], 'file_hash':file_hash, 'is_duplicate':bool(prior['is_duplicate'])}
             existing = connection.execute(
                 "SELECT id FROM documents WHERE file_hash = ?", (file_hash,)
             ).fetchone()
@@ -142,6 +155,7 @@ class DocumentRepository:
                 (document_id, filename, int(is_duplicate), now),
             )
             run_id = run_cursor.lastrowid
+            connection.execute('UPDATE processing_runs SET operation_key=?,result_snapshot=? WHERE id=?', (operation_key, result_json, run_id))
 
         return {
             "document_id": document_id,
@@ -155,6 +169,7 @@ class DocumentRepository:
         file_path: str | Path,
         filename: str,
         final_state: dict[str, Any],
+        operation_key: str | None = None,
     ) -> dict[str, Any]:
         """Replace the latest result of an existing document and record a new run.
 
@@ -167,6 +182,10 @@ class DocumentRepository:
 
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if operation_key:
+                prior = connection.execute('SELECT id,document_id FROM processing_runs WHERE operation_key=?', (operation_key,)).fetchone()
+                if prior:
+                    return {'document_id':prior['document_id'], 'run_id':prior['id'], 'file_hash':file_hash, 'is_duplicate':False, 'reprocessed':True}
             existing = connection.execute(
                 "SELECT id FROM documents WHERE file_hash = ?", (file_hash,)
             ).fetchone()
@@ -203,6 +222,7 @@ class DocumentRepository:
                 (document_id, filename, now),
             )
             run_id = run_cursor.lastrowid
+            connection.execute('UPDATE processing_runs SET operation_key=?,result_snapshot=? WHERE id=?', (operation_key, result_json, run_id))
 
         return {
             "document_id": document_id,
@@ -275,9 +295,9 @@ class DocumentRepository:
             rows = connection.execute(
                 """
                 SELECT id, filename, extracted_data
-                FROM documents WHERE document_type = ?
+                FROM documents WHERE document_type = ? AND id IN (SELECT document_id FROM document_search WHERE po_number=?)
                 """,
-                ("purchase_order",),
+                ("purchase_order", target),
             ).fetchall()
 
         matches = []

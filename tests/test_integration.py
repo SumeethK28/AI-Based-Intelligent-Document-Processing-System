@@ -157,10 +157,10 @@ class IntegrationTests(unittest.TestCase):
     def test_streamlit_pages(self):
         from streamlit.testing.v1 import AppTest
         self.process("ui.txt", "receipt", {"seller": "Shop", "issue_date": "2026-10-01", "total": "INR 20.00"})
-        with patch("idp.pipeline.agentic_pipeline.AgenticDocumentPipeline", return_value=self.pipeline):
+        with patch.dict("os.environ", {"IDP_DATABASE_PATH": str(self.pipeline.repository.db_path)}), patch("idp.pipeline.agentic_pipeline.AgenticDocumentPipeline", return_value=self.pipeline):
             app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app/app.py")).run(timeout=30)
             self.assertEqual(len(app.exception), 0)
-            self.assertEqual(len(app.tabs), 4)
+            self.assertEqual(len(app.radio(key="navigation").options), 9)
             self.assertGreater(len(app.selectbox), 0)
 
 
