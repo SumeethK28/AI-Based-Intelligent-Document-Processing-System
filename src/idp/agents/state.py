@@ -5,7 +5,7 @@ from typing import Any, TypedDict
 class DocumentState(TypedDict, total=False):
 
     # Input
-    document_id: str
+    document_id: int | None
     filename: str
     ocr_text: str
     ocr_confidence: float
@@ -52,3 +52,11 @@ class DocumentState(TypedDict, total=False):
     baseline_document_type: str
     baseline_fields: dict[str, Any]
     fallback_used: list[str]
+    policy_version_id: int | None
+    policy_config: dict[str, Any]
+    rule_outcomes: list[dict[str, Any]]
+    policy_failed_rules: list[str]
+    policy_evaluation_error: str | None
+    policy_latency_ms: float
+    duplicate_business_document_ids: list[int]
+    processing_duration_seconds: float

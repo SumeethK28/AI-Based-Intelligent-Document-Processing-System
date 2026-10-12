@@ -282,7 +282,7 @@ class CrossDocumentVerifier:
                 - po_money.amount
             )
 
-            tolerance = Decimal("0.02")
+            tolerance = Decimal(str(state.get('policy_config', {}).get('po_tolerance', '0.02')))
 
             if abs(difference) > tolerance:
 
@@ -329,6 +329,13 @@ class CrossDocumentVerifier:
                     severity="low",
                 )
             )
+
+        po_state = self.repository.get_document(po['document_id'])
+        if po_state and (po_state['review_decision'] in {'rejected','needs_correction','escalated'}
+                or not po_state['full_result'].get('validation_passed')
+                or po_state['full_result'].get('requires_review') or po_state['full_result'].get('risk_level')!='low'):
+            issues.append(self.issue('PO_REVIEW_BLOCK','Referenced PO is rejected or requires validation/review.'))
+            status = 'incomplete' if status == 'matched' else status
 
         # ====================================================
         # STEP 9: RETURN RESULTS

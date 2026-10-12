@@ -219,6 +219,14 @@ class BatchService:
             if state.get('document_type') != 'invoice' or not state.get('extracted_fields',{}).get('po_reference'):
                 continue
             state = dict(state)
+            from idp.policy.service import PolicyService
+            policy = PolicyService(self.repository)
+            try:
+                state = policy.bind(state)
+            except Exception:
+                from idp.policy.schema import DEFAULT
+                state.update(policy_config=DEFAULT,policy_evaluation_error='Policy binding failed.')
+            state['document_id'] = document['id']
             previous_issues = state.get('cross_document_issues',[])
             other_anomalies = [value for value in state.get('anomalies',[]) if value not in previous_issues]
             state.update(ValidationAgent().run(state))
@@ -229,6 +237,7 @@ class BatchService:
                 levels.add('high')  # Resolving a PO is not authorization to clear other high-risk signals.
             state['risk_level'] = 'high' if 'high' in levels else 'medium' if 'medium' in levels else 'low'
             state.update(CrossDocumentAgent(self.repository).run(state))
+            state = policy.evaluate(state)
             state.update(WorkflowRoutingAgent().run(state))
             if all(state.get(key)==document['full_result'].get(key) for key in ('cross_document_status','cross_document_issues','matched_document_id','workflow_status')):
                 continue

@@ -52,6 +52,7 @@ class WorkflowRoutingAgent:
             or requires_review
             or state.get("cross_document_issues")
             or state.get("cross_document_status") in {"unmatched", "ambiguous", "mismatch", "incomplete"}
+            or state.get('policy_failed_rules') or state.get('policy_evaluation_error')
         ):
 
             workflow_status = "manual_review"
@@ -101,7 +102,7 @@ class WorkflowRoutingAgent:
             workflow_status = "pending_department_review"
 
             assigned_department = (
-                self.DEPARTMENT_MAP[document_type]
+                state.get('policy_config', {}).get('departments', self.DEPARTMENT_MAP)[document_type]
             )
 
             routing_reason = (
@@ -109,6 +110,8 @@ class WorkflowRoutingAgent:
                 "and is queued for departmental processing."
             )
 
+        if state.get('policy_failed_rules'):
+            routing_reason += ' Policy rules requiring review: ' + ', '.join(state['policy_failed_rules']) + '.'
         return {
             "workflow_status": workflow_status,
             "assigned_department": assigned_department,

@@ -1,6 +1,7 @@
 
 from pathlib import Path
 from typing import Any
+from time import perf_counter
 
 from idp.agents.graph import build_agent_graph
 from idp.ocr.rapidocr_engine import RapidOCREngine
@@ -39,6 +40,7 @@ class AgenticDocumentPipeline:
     ) -> dict[str, Any]:
 
         path = Path(file_path)
+        started = perf_counter()
         filename = original_filename or path.name
 
         if not path.is_file():
@@ -132,6 +134,7 @@ class AgenticDocumentPipeline:
         # =============================================
 
         initial_state = {
+            'document_id': previous['id'] if previous else None,
             "filename": filename,
             "ocr_text": baseline_result.ocr.full_text,
             "ocr_confidence": (
@@ -152,6 +155,7 @@ class AgenticDocumentPipeline:
         state = self.graph.invoke(
             initial_state
         )
+        state['processing_duration_seconds'] = perf_counter() - started
 
         # =============================================
         # STEP 6: SAVE NEW OR REPROCESSED DOCUMENT

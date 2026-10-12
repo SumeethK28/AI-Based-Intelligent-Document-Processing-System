@@ -24,7 +24,7 @@ DESCRIPTIONS = {
     "Review Center": "Resolve documents awaiting a recorded review decision, with their evidence in view.",
     "Department Workspaces": "Explore routed work by team. Department selection is a filter, not an access restriction.",
     "Business Analytics": "Understand volumes and invoice values using actual stored records.",
-    "Business Rules": "Inspect the deterministic checks currently applied to documents.",
+    "Business Rules": "Configure, preview and activate versioned document policies with protected safety checks.",
     "Audit & Settings": "Understand data handling and the limits of this local prototype.",
 }
 CSS = """<style>
@@ -116,6 +116,9 @@ def document_detail(repository, document, prefix, *, run_id="latest", duplicate=
     for column, label, key in zip(st.columns(3), ("Workflow", "Verification", "Risk policy"), ("workflow_status", "cross_document_status", "risk_level")):
         column.metric(label, friendly(state.get(key)))
     st.write(state.get("routing_reason", "Routing reason unavailable."))
+    from idp.ui.policies import explanations
+    explanations(state)
+    st.caption('Current human decision: ' + friendly(document.get('review_decision','pending')))
     if state.get("validation_passed"):
         st.success("Preliminary field and evidence checks passed. This is not payment or legal authorization.")
     else:
@@ -294,43 +297,6 @@ def browse(queries, repository, selection, prefix, *, review=False):
         st.write("Recorded review notes:", document["review_notes"])
 
 
-def analytics(queries):
-    data = queries.overview(filters_ui(queries, "analytics"))
-    st.caption("All matching unique records; no 1,000-record cap. Received dates select a document cohort. Submission activity includes all runs for that cohort.")
-    if not data["unique_documents"]:
-        st.info("Process documents or adjust filters to see analytics.")
-        return
-    for col, label, key in zip(st.columns(3), ("Unique documents", "Validation failures", "Recorded submissions"), ("unique_documents", "validation_failed", "submissions")):
-        col.metric(label, data[key])
-    left, right = st.columns(2)
-    for column, title, key in ((left, "Document mix", "types"), (right, "Current workflow", "statuses")):
-        with column:
-            st.subheader(title)
-            st.bar_chart({friendly(row["category"]): row["documents"] for row in data[key]})
-    st.subheader("Submission activity")
-    record_table(data["daily"])
-    st.caption("Recorded submissions are completed or cached runs. Failures are not persisted; this is not a success/failure chart.")
-    st.subheader("Invoice value and review status")
-    record_table(data["invoice_values"])
-    st.caption("Latest extracted totals, counted once per unique invoice. Currencies and review categories stay separate; unparseable amounts are excluded and missing currencies stay unspecified. Review approval is not payment authorization.")
-    st.download_button("Export analytics (JSON)", json.dumps(data, indent=2), file_name="document_analytics.json", mime="application/json")
-    st.info("Processing latency, review turnaround, human effort and cost savings are not measured by the current database.")
-
-
-def rules():
-    from idp.agents.anomaly_agent import AnomalyDetectionAgent
-    from idp.agents.validation_agent import ValidationAgent
-    st.info("Current rules are read-only. Validated configuration and versioned rule history are planned for Milestone 5.")
-    record_table([{"document_type": friendly(kind), "mandatory_fields": ", ".join(friendly(f) for f in fields)} for kind, fields in ValidationAgent.REQUIRED_FIELDS.items()])
-    st.markdown("#### Checks applied today")
-    st.write("• OCR evidence must support extracted values; ambiguous evidence requires review.\n"
-             "• Subtotal plus tax must agree with total within 0.02.\n"
-             "• Referenced POs must match vendor, currency and total within 0.02.\n"
-             "• Contract parties must be distinct and supported; missing dates and unsupported structures require review.\n"
-             "• Failed validation or unresolved PO issues cannot enter the normal department queue.")
-    st.caption(f"High-value review threshold: {AnomalyDetectionAgent().large_amount_threshold} nominal units across currencies, without conversion. This existing policy is not currency-specific or a trained fraud model.")
-
-
 def main():
     load_dotenv()
     st.set_page_config(page_title="Document Operations | Enterprise IDP", page_icon="📄", layout="wide")
@@ -365,9 +331,11 @@ def main():
         from idp.ui.review_workspace import workspace
         workspace(repository,department=True)
     elif page == "Business Analytics":
-        analytics(queries)
+        from idp.ui.intelligence import dashboard
+        dashboard(queries)
     elif page == "Business Rules":
-        rules()
+        from idp.ui.policies import workspace
+        workspace(repository)
     else:
         st.subheader("Processing and data handling")
         st.write("OCR runs locally. Document text is sent to Groq. SQLite stores recognized text, fields and current decisions. Single uploads are temporary; batch sources are retained locally and eligible for explicit cleanup after 30 days.")

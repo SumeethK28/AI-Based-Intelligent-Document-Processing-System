@@ -36,7 +36,7 @@ class PipelineTests(PipelineFixture):
             result = self.process("invoice.txt", "invoice", invoice)
             self.assertEqual(result["state"]["cross_document_status"], "matched")
             self.assertEqual(result["state"]["matched_document_id"], po["document_id"])
-            self.assertEqual(result["state"]["agent_history"][-2:], ["cross_document_verification", "routing_agent"])
+            self.assertEqual(result["state"]["agent_history"][-3:], ["cross_document_verification", 'business_policy', "routing_agent"])
             self.assertEqual(result["state"]["assigned_department"], "Finance")
             calls = self.llm.calls
             duplicate = self.pipeline.process(self.root / "invoice.txt")

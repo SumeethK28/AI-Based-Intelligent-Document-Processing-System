@@ -39,10 +39,18 @@ class ReviewService:
     @staticmethod
     def validation_summary(state):
         return {key:state.get(key) for key in ('validation_passed','validation_errors','validation_warnings',
-            'cross_document_status','cross_document_issues','anomalies','risk_level','requires_review','workflow_status')}
+            'cross_document_status','cross_document_issues','anomalies','risk_level','requires_review','workflow_status',
+            'policy_version_id','rule_outcomes','policy_failed_rules','policy_latency_ms','policy_evaluation_error')}
 
     def validate(self, state):
-        result = copy.deepcopy(state)
+        from idp.policy.service import PolicyService
+        policy = PolicyService(self.repository)
+        try:
+            result = policy.bind(state)
+        except Exception:
+            from idp.policy.schema import DEFAULT
+            result = copy.deepcopy(state)
+            result.update(policy_config=copy.deepcopy(DEFAULT),policy_evaluation_error='Policy binding failed.')
         previous_issues = result.get('cross_document_issues',[])
         other = [item for item in result.get('anomalies',[]) if item not in previous_issues]
         result.update(ValidationAgent().run(result))
@@ -68,6 +76,7 @@ class ReviewService:
                 result.update(cross_document_status='incomplete',requires_review=True,risk_level='high' if result.get('risk_level')=='high' else 'medium')
                 result['cross_document_issues'].append(issue)
                 result['anomalies'].append(issue)
+        result = policy.evaluate(result)
         result.update(WorkflowRoutingAgent().run(result))
         return result
 
@@ -82,6 +91,7 @@ class ReviewService:
         if any(not isinstance(value,str) or len(value)>4000 for value in evidence.values()):
             raise ValueError('Evidence quotes must be short text.')
         state = copy.deepcopy(document['full_result'])
+        state['document_id'] = document_id
         fields = state.setdefault('extracted_fields',{})
         quotes = state.setdefault('field_evidence',{})
         changed = []
@@ -125,7 +135,8 @@ class ReviewService:
             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
             (document['id'],document['processing_version_id'],event_type,json.dumps(previous,ensure_ascii=False),json.dumps(new,ensure_ascii=False),
              actor.strip(),'system' if actor.startswith('system:') else 'prototype_operator',self.repository.timestamp(),decision,reason.strip(),notes[:8000],
-             json.dumps(self.validation_summary(state or json.loads(document['full_result']))),None,document['revision'],updated)).lastrowid
+             json.dumps(self.validation_summary(state or json.loads(document['full_result']))),
+             json.dumps({'policy_version_id':(state or json.loads(document['full_result'])).get('policy_version_id')}),document['revision'],updated)).lastrowid
 
     def apply_correction(self, document_id, expected_revision, changes, evidence, *, actor, reason, notes=''):
         self.identity(actor,reason)
@@ -160,7 +171,9 @@ class ReviewService:
         with self.repository.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             document = self._current(db,document_id,expected_revision)
-            state = self.validate(json.loads(document['full_result']))
+            state = json.loads(document['full_result'])
+            state['document_id'] = document_id
+            state = self.validate(state)
             if decision=='approved' and (not state.get('validation_passed') or state.get('requires_review')
                 or state.get('risk_level')!='low' or state.get('cross_document_issues')
                 or state.get('cross_document_status') in {'unmatched','ambiguous','mismatch','incomplete'}):

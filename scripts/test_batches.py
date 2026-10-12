@@ -211,6 +211,47 @@ with worker_lock(repo.db_path):
         self.assertEqual(after['review_decision'],'escalated')
         self.assertEqual(after['workflow_status'],'manual_review')
 
+    def test_policy_pinning_batch_reconciliation_and_analytics(self):
+        from idp.policy.service import PolicyService
+        from idp.policy.schema import DEFAULT
+        from idp.storage.intelligence import IntelligenceQueries
+        import copy
+        job=self.submit('invoice','po')
+        self.run_job(job,max_items=1)
+        first=self.service.items(job)[0]
+        policy=PolicyService(self.repo)
+        config=copy.deepcopy(DEFAULT); config['escalate_all']=True
+        version=policy.draft(config,actor='admin',reason='Extra review for new documents')
+        preview=policy.preview(version)
+        policy.activate(version,preview['id'],actor='admin',reason='Test batch policy boundary',confirmed=True)
+        self.run_job(job)
+        invoice=self.repo.get_document(first['document_id'])
+        self.assertEqual(invoice['full_result']['policy_version_id'],1)
+        self.assertEqual(invoice['workflow_status'],'manual_review')  # New PO is restricted by policy.
+        self.assertIn('PO_REVIEW_BLOCK',[issue['code'] for issue in invoice['full_result']['cross_document_issues']])
+        report=IntelligenceQueries(self.repo).report()
+        self.assertEqual(report['batches']['terminal_items'],2)
+        self.assertEqual(report['batches']['success_rate'],1)
+        self.assertEqual(report['batches']['failure_rate'],0)
+        self.assertEqual(report['batches']['attempts'],2)
+
+    def test_analytics_batch_failure_retry_denominators(self):
+        from idp.storage.intelligence import IntelligenceQueries
+        self.failure_markers.add('receipt')
+        job=self.submit('receipt','po')
+        self.run_job(job)
+        report=IntelligenceQueries(self.repo).report()
+        self.assertEqual(report['batches']['failure_rate'],.5)
+        failed=next(item for item in self.service.items(job) if item['state']=='failed')
+        self.failure_markers.clear()
+        self.service.retry(failed['id'])
+        self.run_job(job)
+        report=IntelligenceQueries(self.repo).report()
+        self.assertEqual(report['batches']['failure_rate'],0)
+        self.assertEqual(report['batches']['retried_items'],1)
+        self.assertEqual(report['batches']['retry_rate'],.5)
+        self.assertEqual(report['batches']['failed_attempts'],1)
+
     def test_repeated_submission_and_concurrent_requests(self):
         files = [('receipt.pdf',pdf('receipt'))]
         with ThreadPoolExecutor(max_workers=2) as pool:

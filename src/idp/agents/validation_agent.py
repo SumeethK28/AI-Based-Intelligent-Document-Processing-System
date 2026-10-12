@@ -136,6 +136,11 @@ class ValidationAgent:
             document_type,
             [],
         )
+        required = sorted(set(required) | set(state.get('policy_config', {}).get('mandatory_fields', {}).get(document_type, [])))
+        if document_type == 'invoice' and state.get('policy_config', {}).get('require_po_reference'):
+            required.append('po_reference')
+        if document_type == 'contract' and state.get('policy_config', {}).get('require_contract_expiration'):
+            required.append('expiration_date')
 
         for field in required:
             value = fields.get(field)
@@ -270,7 +275,7 @@ class ValidationAgent:
                 expected_total - actual_total
             )
 
-            if difference > Decimal("0.02"):
+            if difference > Decimal(str(state.get('policy_config', {}).get('arithmetic_tolerance', '0.02'))):
                 errors.append(
                     "Total mismatch: "
                     f"subtotal + tax = {expected_total}, "
@@ -312,7 +317,7 @@ class ValidationAgent:
         )
 
         return {
-            "missing_optional_fields": [field for field in self.OPTIONAL_FIELDS.get(document_type, []) if not fields.get(field)],
+            "missing_optional_fields": [field for field in self.OPTIONAL_FIELDS.get(document_type, []) if field not in required and not fields.get(field)],
             "validation_passed": validation_passed,
             "validation_errors": errors,
             "validation_warnings": warnings,

@@ -19,6 +19,8 @@ class DocumentRepository:
         migrate(self)
         from idp.storage.review_migration import migrate_review
         migrate_review(self)
+        from idp.storage.policy_migration import migrate_policy
+        migrate_policy(self)
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:

@@ -23,6 +23,17 @@ def build_agent_graph(repository=None, llm=None):
     llm = llm if llm is not None else GroqProvider()
     repository = repository if repository is not None else DocumentRepository()
     verification_agent = CrossDocumentAgent(repository)
+    from idp.policy.service import PolicyService
+    policy = PolicyService(repository)
+    def bind_policy(state):
+        try:
+            version = state.get('policy_version_id')
+            if version is None:
+                version = policy.active()['id']
+            return policy.bind(state, version)
+        except Exception:
+            from idp.policy.schema import DEFAULT
+            return {'policy_config': DEFAULT, 'policy_evaluation_error': 'Policy binding failed; manual review required.'}
 
     # =============================================
     # INITIALIZE SPECIALIZED AGENTS
@@ -51,7 +62,7 @@ def build_agent_graph(repository=None, llm=None):
 
     graph.add_node(
         "extraction_agent",
-        extraction_agent.run,
+        lambda state: {**extraction_agent.run(state), **{key:value for key,value in bind_policy(state).items() if key.startswith('policy_')}},
     )
 
     graph.add_node(
@@ -95,7 +106,9 @@ def build_agent_graph(repository=None, llm=None):
 
     graph.add_node("cross_document_verification", verification_agent.run)
     graph.add_edge("anomaly_agent", "cross_document_verification")
-    graph.add_edge("cross_document_verification", "routing_agent")
+    graph.add_node('business_policy', policy.evaluate)
+    graph.add_edge("cross_document_verification", 'business_policy')
+    graph.add_edge('business_policy', "routing_agent")
 
     graph.add_edge(
         "routing_agent",

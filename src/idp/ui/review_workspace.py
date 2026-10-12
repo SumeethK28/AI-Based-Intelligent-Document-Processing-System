@@ -74,9 +74,11 @@ def workspace(repository, *, department=False):
                 event=st.selectbox('Inspect event',[event['id'] for event in events],key=stamp+'_event')
                 with st.expander('Advanced event details'):
                     st.json(next(value for value in events if value['id']==event))
-                st.caption('Rule versions are unavailable: checks are current code rules, not a versioned rule service.')
+                st.caption('Each new check records its policy version. Legacy events retain their original unavailable version; history is never rewritten.')
     with right:
         document_detail(repository,document,prefix,run_id=revision)
+        from idp.ui.policies import reevaluation
+        reevaluation(repository,document,operator)
         state=document['full_result']
         if not state.get('field_evidence') or state.get('evidence_warnings') or state.get('validation_warnings'):
             st.warning('Some evidence is missing or unverifiable. Approval remains blocked until the checks pass.')

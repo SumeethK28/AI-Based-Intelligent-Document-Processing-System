@@ -4,6 +4,7 @@ from typing import Any
 
 from idp.agents.state import DocumentState
 from idp.agents.validation_agent import ValidationAgent
+from idp.utils.money import parse_money
 
 
 class AnomalyDetectionAgent:
@@ -85,7 +86,11 @@ class AnomalyDetectionAgent:
                         )
                     )
 
-                if amount > self.large_amount_threshold:
+                money = parse_money(total_value)
+                config = state.get('policy_config', {})
+                threshold = Decimal(str(config.get('high_value_thresholds', {}).get(money.currency if money else None,
+                    config.get('unknown_currency_threshold', self.large_amount_threshold))))
+                if amount > threshold:
                     anomalies.append(
                         self.anomaly(
                             code="LARGE_AMOUNT",
