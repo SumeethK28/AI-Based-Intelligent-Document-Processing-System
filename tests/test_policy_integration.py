@@ -1,4 +1,5 @@
 """Actual LangGraph/SQLite/review integration; simulated provider only."""
+from idp.security import INTERNAL
 import copy
 import tempfile
 import unittest
@@ -19,7 +20,7 @@ class PolicyIntegrationTests(unittest.TestCase):
             baseline=SimpleNamespace(process=lambda path:SimpleNamespace(extracted_data=None,
                 classification=SimpleNamespace(document_class=SimpleNamespace(value=llm.kind)),
                 ocr=SimpleNamespace(full_text='\n'.join(llm.fields.values()),average_confidence=1)))
-            pipeline=AgenticDocumentPipeline(root/'test.db',baseline=baseline,llm=llm)
+            pipeline=AgenticDocumentPipeline(root/'test.db',baseline=baseline,llm=llm, _capability=INTERNAL)
             llm.kind='invoice'; llm.fields={'invoice_number':'INV-1','issue_date':'2026-10-01','seller':'Supplier','client':'Buyer','total':'INR 100.00'}
             source=root/'invoice.txt'; source.write_text('synthetic invoice source')
             first=pipeline.process(source)
@@ -51,7 +52,7 @@ class PolicyIntegrationTests(unittest.TestCase):
             baseline=SimpleNamespace(process=lambda path:SimpleNamespace(extracted_data=None,
                 classification=SimpleNamespace(document_class=SimpleNamespace(value='receipt')),
                 ocr=SimpleNamespace(full_text='\n'.join(llm.fields.values()),average_confidence=1)))
-            pipeline=AgenticDocumentPipeline(root/'test.db',baseline=baseline,llm=llm)
+            pipeline=AgenticDocumentPipeline(root/'test.db',baseline=baseline,llm=llm, _capability=INTERNAL)
             source=root/'receipt.txt'; source.write_text('synthetic receipt')
             with patch.object(PolicyService,'active',side_effect=RuntimeError('Simulated storage fault')):
                 result=pipeline.process(source)

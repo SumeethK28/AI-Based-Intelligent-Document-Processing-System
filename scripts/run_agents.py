@@ -1,3 +1,4 @@
+from idp.security import INTERNAL
 
 import sys
 from pathlib import Path
@@ -24,7 +25,7 @@ def main():
     if not file_path.is_file():
         raise FileNotFoundError(file_path)
 
-    repository = DocumentRepository()
+    repository = DocumentRepository(_capability=INTERNAL)
     existing_document = repository.check_duplicate(
         file_path
     )

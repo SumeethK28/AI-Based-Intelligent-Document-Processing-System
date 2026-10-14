@@ -1,4 +1,5 @@
 """SQLite component tests use disposable databases only."""
+from idp.security import INTERNAL
 import sqlite3
 import tempfile
 import unittest
@@ -12,7 +13,7 @@ class StorageTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
-        self.repository = DocumentRepository(self.root / "test.db")
+        self.repository = DocumentRepository(self.root / "test.db", _capability=INTERNAL)
         self.document = self.root / "invoice.txt"
         self.document.write_text("invoice")
         self.state = {"document_type": "invoice", "extracted_fields": {"seller": "Café"}}
@@ -22,7 +23,7 @@ class StorageTests(unittest.TestCase):
 
     def test_save_reopen_and_duplicate(self):
         saved = self.save()
-        reopened = DocumentRepository(self.root / "test.db")
+        reopened = DocumentRepository(self.root / "test.db", _capability=INTERNAL)
         self.assertEqual(reopened.get_document(saved["document_id"])["full_result"], self.state)
         self.assertEqual(reopened.check_duplicate(self.document)["id"], saved["document_id"])
         duplicate = self.save()

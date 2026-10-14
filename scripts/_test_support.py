@@ -1,3 +1,4 @@
+from idp.security import INTERNAL
 import tempfile
 import unittest
 from pathlib import Path
@@ -33,7 +34,7 @@ class PipelineFixture(unittest.TestCase):
             self.root = Path(self.temp.name)
             self.llm = FakeLLM()
             self.baseline = SimpleNamespace(process=self.baseline_result)
-            self.pipeline = AgenticDocumentPipeline(self.root / "test.db", baseline=self.baseline, llm=self.llm)
+            self.pipeline = AgenticDocumentPipeline(self.root / "test.db", baseline=self.baseline, llm=self.llm, _capability=INTERNAL)
 
     def baseline_result(self, path):
             return SimpleNamespace(extracted_data=None, classification=SimpleNamespace(document_class=SimpleNamespace(value=self.llm.kind)), ocr=SimpleNamespace(full_text="\n".join(self.llm.fields.values()), average_confidence=1))

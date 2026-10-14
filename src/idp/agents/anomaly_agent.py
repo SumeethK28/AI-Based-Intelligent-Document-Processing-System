@@ -45,6 +45,9 @@ class AnomalyDetectionAgent:
         )
 
         anomalies = []
+        from idp.security.document_safety import injection_signal
+        if injection_signal(state.get('ocr_text','')):
+            anomalies.append(self.anomaly('DOCUMENT_INSTRUCTIONS','Document contains instruction-like content; verify the source. It cannot authorize policy or routing changes.','high'))
 
         # =============================================
         # 1. EVIDENCE ANOMALIES

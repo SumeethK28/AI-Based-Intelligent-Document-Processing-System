@@ -1,4 +1,5 @@
 """Run real OCR/Groq against existing samples, retaining safe audit results."""
+from idp.security import INTERNAL
 import json
 import platform
 import argparse
@@ -15,7 +16,7 @@ def main():
     args = parser.parse_args()
     assert platform.python_version() == "3.14.6"
     provider = GroqProvider()
-    pipeline = AgenticDocumentPipeline(llm=provider)
+    pipeline = AgenticDocumentPipeline(llm=provider, _capability=INTERNAL)
     output = Path("results/live_integration_" + datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + ".json")
     output.parent.mkdir(parents=True, exist_ok=True)
     report = {"python": platform.python_version(), "model": provider.model,

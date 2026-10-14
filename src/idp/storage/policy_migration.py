@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 def migrate_policy(repository):
     from idp.policy.schema import DEFAULT
-    with repository.connect() as db:
+    with repository._connect() as db:
         if db.execute("SELECT 1 FROM sqlite_master WHERE name='policy_versions'").fetchone():
             return
         if db.execute('SELECT count(*) FROM documents').fetchone()[0]:

@@ -14,9 +14,14 @@ def workspace(repository, *, department=False):
     from idp.ui.console import filters_ui, record_table, document_detail, friendly
     from idp.ui.batches import retained_details
     service = ReviewService(repository)
-    st.warning('Trusted local prototype: typed operator identifiers are not authenticated. Team assignment and queue filters do not enforce authorization. Decisions never execute payments or legal agreements.')
-    operator = st.text_input('Prototype operator identifier (unauthenticated)',key='review_operator',max_chars=120)
-    team = st.selectbox('Team',TEAMS[:4],key='workspace_department') if department else ''
+    repository.require('review')
+    if repository.internal:
+        operator=st.text_input('Prototype operator identifier (unauthenticated)',key='review_operator',max_chars=120)
+    else:
+        operator=repository.access.actor(None,'review')
+        st.caption('Review identity comes from your authenticated account. Historical prototype names remain unverified. Approval never executes payments or legal agreements.')
+    available_teams=TEAMS[:4] if repository.internal or repository.access.principal()['role']=='Administrator' else repository.access.principal()['departments']
+    team = st.selectbox('Team',available_teams,key='workspace_department') if department else ''
     if department:
         messages = {'Finance':'Invoice reconciliation, amount and supplier issues.',
             'Procurement':'Assigned PO/vendor work and invoices with unresolved PO references.',
@@ -58,7 +63,7 @@ def workspace(repository, *, department=False):
     with left:
         st.subheader('Original source and history')
         retained_details(repository,selected,record_table,expanded=True)
-        with repository.connect() as db:
+        with repository._connect() as db:
             versions=[dict(row) for row in db.execute('SELECT * FROM processing_versions WHERE document_id=? ORDER BY id DESC',(selected,))]
         with st.expander('Preserved processing originals'):
             version=st.selectbox('Original processing version',[row['id'] for row in versions],key=stamp+'_version')
@@ -74,11 +79,12 @@ def workspace(repository, *, department=False):
                 event=st.selectbox('Inspect event',[event['id'] for event in events],key=stamp+'_event')
                 with st.expander('Advanced event details'):
                     st.json(next(value for value in events if value['id']==event))
-                st.caption('Each new check records its policy version. Legacy events retain their original unavailable version; history is never rewritten.')
+                st.caption('Authenticated actors are linked to account IDs. Earlier prototype_operator values are unauthenticated historical labels. Policy and model history is never rewritten.')
     with right:
         document_detail(repository,document,prefix,run_id=revision)
         from idp.ui.policies import reevaluation
-        reevaluation(repository,document,operator)
+        from idp.ui.security import allowed
+        if allowed(repository,'policy'): reevaluation(repository,document,operator)
         state=document['full_result']
         if not state.get('field_evidence') or state.get('evidence_warnings') or state.get('validation_warnings'):
             st.warning('Some evidence is missing or unverifiable. Approval remains blocked until the checks pass.')
@@ -119,11 +125,18 @@ def workspace(repository, *, department=False):
             management_reason=st.text_area('Case action reason',key=stamp+'_manage_reason')
             if st.button('Claim case',key=stamp+'_claim'):
                 mutate(lambda:service.manage(selected,revision,'claim',actor=operator,reason=management_reason))
-            assignment=st.selectbox('Assigned team',TEAMS,index=TEAMS.index(case['team']) if case['team'] in TEAMS else 0,key=stamp+'_team')
-            assignee=st.text_input('Assign to prototype operator',value=case['assignee'] or '',key=stamp+'_new_assignee',max_chars=120)
-            consent=st.checkbox('I confirm reassignment to this team and operator.',key=stamp+'_assign_confirm')
-            if st.button('Assign / reassign case',disabled=not consent,key=stamp+'_assign'):
-                mutate(lambda:service.manage(selected,revision,'assign',actor=operator,reason=management_reason,team=assignment,assignee=assignee))
+            if allowed(repository,'assign'):
+                assignment=st.selectbox('Assigned team',TEAMS,index=TEAMS.index(case['team']) if case['team'] in TEAMS else 0,key=stamp+'_team')
+                if repository.internal:
+                    assignee=st.text_input('Assign to prototype operator',value=case['assignee'] or '',key=stamp+'_new_assignee',max_chars=120)
+                else:
+                    from idp.security.auth import AuthService
+                    users=[row for row in AuthService(repository).users() if row['active'] and (row['role']=='Administrator' or row['role'].endswith('Reviewer') and assignment in json.loads(row['departments']))]
+                    assignees=['']+[f"user:{row['id']}:{row['username']}" for row in users]
+                    assignee=st.selectbox('Assign to authenticated reviewer',assignees,key=stamp+'_new_assignee')
+                consent=st.checkbox('I confirm reassignment to this team and operator.',key=stamp+'_assign_confirm')
+                if st.button('Assign / reassign case',disabled=not consent,key=stamp+'_assign'):
+                    mutate(lambda:service.manage(selected,revision,'assign',actor=operator,reason=management_reason,team=assignment,assignee=assignee))
             statuses=['open','in_review','on_hold']
             status=st.selectbox('Working status',statuses,index=statuses.index(case['case_status']) if case['case_status'] in statuses else 0,format_func=friendly,key=stamp+'_status')
             if st.button('Update working status',key=stamp+'_set_status'):

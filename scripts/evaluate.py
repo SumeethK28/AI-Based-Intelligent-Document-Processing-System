@@ -1,4 +1,5 @@
 """Measured live evaluation on existing samples; never uses simulated providers."""
+from idp.security import INTERNAL
 import json
 import platform
 import statistics
@@ -39,7 +40,7 @@ def main():
     output = Path("results") / ("evaluation_" + stamp)
     output.mkdir(parents=True)
     provider = RecordingGroqProvider()
-    pipeline = AgenticDocumentPipeline(output / "evaluation.db", llm=provider)
+    pipeline = AgenticDocumentPipeline(output / "evaluation.db", llm=provider, _capability=INTERNAL)
     report = {"python": platform.python_version(), "model": provider.model, "started_at_utc": stamp,
               "conditions": "Real RapidOCR + Groq, new isolated SQLite DB, PO first, serial processing, no mocks. Timings include OCR/API/retries/SQLite and exclude construction and inter-document pacing.",
               "ground_truth_source": "PDF embedded source text; standard invoice visually transcribed in prior live verification; monetary values compared by amount and currency, other values by normalized whitespace/case.",

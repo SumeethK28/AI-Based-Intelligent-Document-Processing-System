@@ -22,13 +22,13 @@ class AgenticDocumentPipeline:
     - Forced reprocessing
     """
 
-    def __init__(self, database_path="data/idp.db", *, baseline=None, llm=None):
-
+    def __init__(self, database_path="data/idp.db", *, baseline=None, llm=None, session_token=None, _capability=None):
+        self.repository = DocumentRepository(database_path, session_token=session_token, _capability=_capability)
+        self.repository.require('process')
         self.baseline = baseline if baseline is not None else DocumentPipeline(
             ocr_engine=RapidOCREngine()
         )
 
-        self.repository = DocumentRepository(database_path)
         self.graph = build_agent_graph(repository=self.repository, llm=llm)
 
     def process(
@@ -37,9 +37,20 @@ class AgenticDocumentPipeline:
         original_filename: str | None = None,
         force_reprocess: bool = False,
         operation_key: str | None = None,
+        ai_consent: bool = False,
     ) -> dict[str, Any]:
 
         path = Path(file_path)
+        principal = self.repository.require('process')
+        if not self.repository.internal:
+            if ai_consent is not True:
+                raise ValueError('Explicit consent to external Groq processing is required.')
+            from idp.batch.ingestion import inspect_file
+            if not path.is_file() or path.stat().st_size>20*1024*1024:
+                raise ValueError('Document exceeds safe file limits or is unavailable.')
+            inspect_file(original_filename or path.name,path.read_bytes())
+            from idp.security.auth import AuthService
+            AuthService(self.repository).event('external_ai_processing','allowed','document',principal['id'])
         started = perf_counter()
         filename = original_filename or path.name
 
@@ -47,7 +58,7 @@ class AgenticDocumentPipeline:
             raise FileNotFoundError(path)
         if operation_key:
             import json
-            with self.repository.connect() as db:
+            with self.repository._connect() as db:
                 prior = db.execute('SELECT * FROM processing_runs WHERE operation_key=?', (operation_key,)).fetchone()
             if prior:
                 document = self.repository.get_document(prior['document_id'])

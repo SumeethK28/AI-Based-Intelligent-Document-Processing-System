@@ -1,4 +1,5 @@
 """Component regression tests; API responses are simulated unless explicitly noted."""
+from idp.security import INTERNAL
 import tempfile
 import unittest
 from pathlib import Path
@@ -63,7 +64,7 @@ class PipelineTests(PipelineFixture):
             extracted = ExtractionAgent(self.llm).run(state)
             self.assertEqual(extracted["extracted_fields"]["seller"], "Shop")
             self.assertFalse(extracted["evidence_warnings"])
-            service = AgentDocumentService(self.root / "service.db", baseline=self.baseline, llm=self.llm)
+            service = AgentDocumentService(self.root / "service.db", baseline=self.baseline, llm=self.llm, _capability=INTERNAL)
             self.llm.kind = "receipt"
             self.llm.fields = {"seller": "Shop", "issue_date": "2026-10-01", "total": "INR 20.00"}
             path = self.root / "service.txt"

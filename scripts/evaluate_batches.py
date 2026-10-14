@@ -1,4 +1,5 @@
 """Opt-in live RapidOCR/Groq batch evaluation. Never prints raw provider errors."""
+from idp.security import INTERNAL
 import argparse
 import json
 import os
@@ -21,12 +22,12 @@ if __name__ == '__main__':
     output = Path(args.output) if args.output else root/'results'/('milestone3_'+datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S'))
     output.mkdir(parents=True,exist_ok=False)
     database = output/'live.db'
-    service = BatchService(DocumentRepository(database))
+    service = BatchService(DocumentRepository(database, _capability=INTERNAL))
     samples = root/'data/samples/cross_document'
     files = [(name,(samples/name).read_bytes()) for name in ('invoice_matching.pdf','purchase_order_1023.pdf')]
     batch = service.submit(files,request_key='controlled-live-invoice-first',name='Live invoice before PO')
     start = time.perf_counter()
-    service.run(lambda:AgenticDocumentPipeline(database),batch)
+    service.run(lambda:AgenticDocumentPipeline(database, _capability=INTERNAL),batch)
     elapsed = time.perf_counter()-start
     summary = service.summary(batch)
     checks = []

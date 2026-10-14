@@ -43,16 +43,14 @@ def friendly(value):
     return str(value or "Unavailable").replace("_", " ").title()
 
 
-@st.cache_resource
 def get_repository(database_path):
     return DocumentRepository(database_path)
 
 
-@st.cache_resource
 def get_pipeline(database_path):
     # Expensive OCR/model initialization happens only when processing starts.
     from idp.pipeline.agentic_pipeline import AgenticDocumentPipeline
-    return AgenticDocumentPipeline(database_path=database_path)
+    return AgenticDocumentPipeline(database_path=database_path,session_token=st.session_state.get('auth_token'))
 
 
 def navigate(page):
@@ -90,7 +88,8 @@ def filters_ui(queries, prefix, *, search=False):
             if minimum is not None and minimum > maximum:
                 st.warning('Minimum amount must not exceed maximum amount.')
                 st.stop()
-            jobs = BatchService(queries.repository).history()
+            from idp.ui.security import allowed
+            jobs = BatchService(queries.repository).history() if allowed(queries.repository,'batches') else []
             names = {job['id']:job['name'] for job in jobs}
             batch_id = st.selectbox('Batch membership',['']+list(names),format_func=lambda key:names.get(key,'All batches'),key=prefix+'_batch')
     return DocumentFilters(kind, department, status, decision, start if use_dates else None, end if use_dates else None, query,currency,minimum,maximum,batch_id)
@@ -104,10 +103,13 @@ def record_table(rows):
 
 def issues(values):
     for item in values:
-        st.warning(item.get("description", str(item)) if isinstance(item, dict) else str(item))
+        st.warning('Verification needs attention.')
+        # Document-derived descriptions must not load Markdown images or links.
+        st.text(item.get("description", str(item)) if isinstance(item, dict) else str(item))
 
 
 def document_detail(repository, document, prefix, *, run_id="latest", duplicate=False):
+    repository.access.document(document['id'])
     state = document["full_result"]
     st.subheader(document["filename"])
     st.caption(f"Document {document['id']} · {friendly(state.get('document_type'))} · {state.get('assigned_department', 'Unassigned')}")
@@ -129,7 +131,7 @@ def document_detail(repository, document, prefix, *, run_id="latest", duplicate=
     st.markdown("#### Extracted information")
     st.caption("Formula-like text is escaped in table/CSV views. Original values are preserved in JSON.")
     if fields:
-        record_table([{"field": friendly(field), "value": value, "source": "Not extracted / omitted" if not value else "Human correction (prototype operator)" if state.get('field_provenance',{}).get(field,{}).get('source')=='human_correction' else "Verified OCR/layout fallback" if field in state.get("fallback_used", []) else "AI extraction"} for field, value in fields.items()])
+        record_table([{"field": friendly(field), "value": value, "source": "Not extracted / omitted" if not value else "Human correction (authenticated account)" if state.get('field_provenance',{}).get(field,{}).get('actor_kind')=='authenticated_user' else "Human correction (historical prototype operator)" if state.get('field_provenance',{}).get(field,{}).get('source')=='human_correction' else "Verified OCR/layout fallback" if field in state.get("fallback_used", []) else "AI extraction"} for field, value in fields.items()])
     else:
         st.info("No structured fields were extracted.")
     with st.expander("Field Evidence"):
@@ -159,8 +161,11 @@ def document_detail(repository, document, prefix, *, run_id="latest", duplicate=
         st.text_area("Recognized document text", state.get("ocr_text", ""), height=260, disabled=True, key=f"{prefix}_ocr_{document['id']}_{run_id}")
         st.caption("OCR and classification confidence are reported scores, not measured accuracy.")
         st.json({key: state.get(key) for key in ("ocr_confidence", "classification_confidence", "extraction_confidence", "agent_history")})
-    st.download_button("Download Processing Result (JSON)", json.dumps(state, indent=2, ensure_ascii=False),
-                       file_name=f"document_{document['id']}_run_{run_id}.json", mime="application/json", key=f"{prefix}_download_{document['id']}_{run_id}")
+    if repository.internal:
+        st.download_button('Download Processing Result (JSON)',json.dumps(state),file_name='document.json',key=f'{prefix}_download_{document["id"]}_{run_id}')
+    else:
+        from idp.ui.security import download_control
+        download_control(repository,'Download Processing Result (JSON)','document_json',{'document_id':document['id']},f'{prefix}_download_{document["id"]}')
 
 
 def overview(queries):
@@ -173,7 +178,8 @@ def overview(queries):
             column.metric(label, data[key])
     st.caption("Unique documents count each hash once. Submissions include reprocessing and cached duplicates for the selected document cohort. Awaiting decision includes normal departmental work; review exceptions are escalated cases with a pending decision.")
     for column, label, page in zip(st.columns(3), ("Process a document", "Open review cases", "Browse repository"), ("Process Documents", "Review Center", "Document Repository")):
-        column.button(label, on_click=navigate, args=(page,), width="stretch", type="primary" if page == "Process Documents" else "secondary")
+        from idp.ui.security import allowed,PAGE_PERMISSION
+        if allowed(queries.repository,PAGE_PERMISSION[page]): column.button(label, on_click=navigate, args=(page,), width="stretch", type="primary" if page == "Process Documents" else "secondary")
     if not data["unique_documents"]:
         st.info("No documents match this view. Adjust filters or process your first document.")
         return
@@ -188,15 +194,16 @@ def overview(queries):
             st.caption("No parseable invoice totals in this view.")
         st.caption("Extracted amounts by currency and decision category, not paid balances.")
     st.subheader("Needs attention")
-    exception_rows = queries.exceptions(selection)
+    exception_rows = queries.exceptions(selection) if allowed(queries.repository,'documents') else []
     record_table(exception_rows)
     if not exception_rows:
-        st.caption("No pending escalated cases match this view.")
+        st.caption("No pending escalated cases match this view." if allowed(queries.repository,'documents') else 'This role receives summary counts. Individual case details require document access.')
     st.subheader("Recent processing activity")
     record_table(data["activity"])
 
 
 def process_document(database_path, repository):
+    repository.require('process')
     st.info("Document text is sent to the configured Groq service. Use authorized documents only.")
     st.caption("For multiple documents, open Bulk Processing. Single uploads remain temporary; batch sources are retained locally.")
     def clear_result():
@@ -206,11 +213,12 @@ def process_document(database_path, repository):
     if upload is None:
         st.info("Choose an invoice, purchase order, receipt or contract to begin.")
         return
-    if upload.type.startswith("image/"):
+    if repository.internal and upload.type.startswith("image/"):
         with st.expander("Document preview"):
             st.image(upload, width=500)
     force = st.checkbox("Reprocess even if document already exists", key="force_reprocess", help="Runs OCR and AI again, updates the latest result and resets the review decision. Uses API quota.")
-    if st.button("Process with AI Agents", type="primary", width="stretch"):
+    consent=st.checkbox('I authorize sending this document OCR text to the configured external Groq service.',key='ai_consent')
+    if st.button("Process with AI Agents", type="primary", width="stretch",disabled=not consent):
         st.session_state.pop("last_result", None)
         try:
             with st.spinner("Reading, checking and routing your document…"):
@@ -218,7 +226,7 @@ def process_document(database_path, repository):
                     path = Path(directory) / ("document" + Path(upload.name).suffix.lower())
                     content = upload.getvalue()
                     path.write_bytes(content)
-                    result = get_pipeline(database_path).process(path, original_filename=Path(upload.name).name, force_reprocess=force)
+                    result = get_pipeline(database_path).process(path, original_filename=Path(upload.name).name, force_reprocess=force,ai_consent=consent)
                     st.session_state["last_result"] = result
                     st.session_state["last_upload_hash"] = hashlib.sha256(content).hexdigest()
             st.success(result["message"])
@@ -236,7 +244,14 @@ def process_document(database_path, repository):
 
 
 def browse(queries, repository, selection, prefix, *, review=False):
-    if prefix == 'repository':
+    repository.require('documents')
+    if not repository.internal and prefix=='repository':
+        from idp.ui.security import download_control
+        from dataclasses import asdict
+        encoded={key:value.isoformat() if hasattr(value,'isoformat') else value for key,value in asdict(selection).items()}
+        download_control(repository,'Download filtered JSON','filtered_json',{'filters':encoded},'secure_filtered_json')
+        download_control(repository,'Download filtered CSV','filtered_csv',{'filters':encoded},'secure_filtered_csv')
+    if repository.internal and prefix == 'repository':
         if st.button('Prepare filtered export'):
             try:
                 records = queries.export(selection)
@@ -282,19 +297,31 @@ def browse(queries, repository, selection, prefix, *, review=False):
         return
     st.divider()
     document_detail(repository, document, prefix)
+    with st.expander('Review and policy audit history (read-only)'):
+        from idp.review.service import ReviewService
+        audit_events=ReviewService(repository).history(selected)
+        record_table([{key:event[key] for key in ('id','event_type','actor','actor_kind','created_at','decision','reason','previous_revision','new_revision')} for event in audit_events])
+        if not audit_events:
+            st.caption('No review events recorded. Earlier unavailable history is not reconstructed.')
+        else:
+            event_id=st.selectbox('Inspect audit event',[event['id'] for event in audit_events],key=f'{prefix}_audit_{selected}')
+            with st.expander('Recorded audit details'):
+                st.json(next(event for event in audit_events if event['id']==event_id))
+        st.caption('authenticated_user identifies a verified account; prototype_operator identifies an unauthenticated historical label. This view has no review mutation controls.')
     from idp.ui.batches import retained_details
     retained_details(repository,selected,record_table)
     with st.expander("Recorded processing history"):
         record_table(queries.document_runs(selected))
         st.caption("New runs retain result snapshots. Legacy run snapshots are unavailable. Batch failures and measured durations are in Bulk Processing.")
-        with repository.connect() as db:
+        with repository._connect() as db:
             runs = [dict(row) for row in db.execute('SELECT id,result_snapshot FROM processing_runs WHERE document_id=? AND result_snapshot IS NOT NULL ORDER BY id DESC',(selected,))]
         if runs:
             run = st.selectbox('Inspect recorded run',[row['id'] for row in runs],key=prefix+'_run')
             st.json(json.loads(next(row['result_snapshot'] for row in runs if row['id']==run)))
     st.caption("Review decision: " + friendly(document["review_decision"]))
     if document.get("review_notes"):
-        st.write("Recorded review notes:", document["review_notes"])
+        st.caption('Recorded review notes:')
+        st.text(document['review_notes'])
 
 
 def main():
@@ -303,17 +330,24 @@ def main():
     st.markdown(CSS, unsafe_allow_html=True)  # Static CSS; never interpolate document content.
     database_path = os.getenv("IDP_DATABASE_PATH", "data/idp.db")
     repository = get_repository(database_path)
+    from idp.ui.security import gate,account_controls,allowed,PAGE_PERMISSION
+    repository,principal=gate(repository)
     queries = OperationsQueries(repository)
     with st.sidebar:
         st.markdown("## Document Operations")
         st.caption("Enterprise IDP · local prototype")
-        page = st.radio("Workspace", PAGES, key="navigation", label_visibility="collapsed")
+        pages=[page for page in PAGES if allowed(repository,PAGE_PERMISSION[page])]
+        if not repository.internal and allowed(repository,'users'): pages.append('Accounts')
+        if st.session_state.get('navigation') not in pages: st.session_state.pop('navigation',None)
+        page = st.radio("Workspace", pages, key="navigation", label_visibility="collapsed")
+        repository.require(PAGE_PERMISSION[page])
+        account_controls(repository,principal)
         st.divider()
         st.caption("Evidence-grounded processing. No payment or legal execution.")
-        st.caption("Trusted local use only. Authentication and department authorization are not implemented yet.")
+        st.caption('Authenticated local research prototype. Department scope is enforced in services; OS administrator access remains privileged.')
     st.caption("DOCUMENT OPERATIONS / " + page.upper())
     st.title(page)
-    st.caption(DESCRIPTIONS[page])
+    st.caption(DESCRIPTIONS.get(page,'Manage individual accounts and explicit department scope.'))
     st.divider()
     if page == "Overview":
         overview(queries)
@@ -336,11 +370,33 @@ def main():
     elif page == "Business Rules":
         from idp.ui.policies import workspace
         workspace(repository)
+    elif page=='Accounts':
+        from idp.ui.security import accounts
+        accounts(repository)
     else:
         st.subheader("Processing and data handling")
         st.write("OCR runs locally. Document text is sent to Groq. SQLite stores recognized text, fields and current decisions. Single uploads are temporary; batch sources are retained locally and eligible for explicit cleanup after 30 days.")
         st.write("Classification, extraction, validation, anomalies and purchase orders are checked before routing. Confidence values are reported scores, not calibrated accuracy.")
-        st.info("Local prototype: review events and processing originals are append-only during normal operations. There is no authentication, role enforcement, cryptographic tamper protection, retention deletion workflow or compliance certification. Team assignment does not restrict access.")
+        st.info('Individual accounts and server-side department authorization are enforced. This prototype has no MFA, cryptographic audit protection, encrypted SQLite storage or compliance certification. OS administrators remain privileged.')
+        from idp.ui.security import password_form
+        password_form(repository)
         st.caption("Configured model: " + os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"))
         st.caption("Credentials are never displayed. Transient provider retries are bounded; invalid credentials are not repeatedly retried.")
         record_table(queries.overview()["activity"])
+        if allowed(repository,'security_audit'):
+            with repository._connect() as db:
+                events=[dict(row) for row in db.execute('SELECT id,event_type,user_id,outcome,resource,created_at FROM security_events ORDER BY id DESC LIMIT 100')]
+            st.subheader('Security event history'); record_table(events)
+        if allowed(repository,'governance'):
+            from idp.security.governance import GovernanceService
+            st.subheader('Retention and source cleanup')
+            service=GovernanceService(repository)
+            candidates=service.candidates(); record_table(candidates)
+            eligible=[row for row in candidates if row['eligible']]
+            if eligible:
+                selected=st.selectbox('Expired unlinked source',[row['id'] for row in eligible])
+                confirmed=st.checkbox('I confirm deletion of this expired source with no document or audit reference.')
+                if st.button('Clean up expired source',disabled=not confirmed):
+                    try: service.cleanup(selected,confirmed=confirmed)
+                    except ValueError as error: st.error(str(error))
+                    else: st.success('Expired unlinked source removed; document and audit rows preserved.')

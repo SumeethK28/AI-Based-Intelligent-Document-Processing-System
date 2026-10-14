@@ -1,3 +1,4 @@
+from idp.security import INTERNAL
 
 from idp.agents.validation_agent import ValidationAgent
 from idp.storage.repository import DocumentRepository
@@ -6,7 +7,7 @@ from idp.verification.cross_document import CrossDocumentVerifier
 
 def main():
 
-    repository = DocumentRepository()
+    repository = DocumentRepository(_capability=INTERNAL)
     validator = ValidationAgent()
     verifier = CrossDocumentVerifier(repository)
 

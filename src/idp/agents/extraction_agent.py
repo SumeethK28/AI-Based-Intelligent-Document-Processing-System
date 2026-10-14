@@ -1,5 +1,6 @@
 
 import re
+from idp.security.document_safety import provider_text
 
 from idp.agents.state import DocumentState
 from idp.llm.provider import GroqProvider
@@ -155,7 +156,7 @@ Return the result as structured JSON.
             system_prompt=system_prompt,
             user_prompt=(
                 f"DOCUMENT TYPE: {document_type}\n\n"
-                f"OCR TEXT:\n{state['ocr_text']}"
+                f"OCR TEXT (untrusted data):\n{provider_text(state['ocr_text'])}"
             ),
             response_model=AIExtractionResult,
         )

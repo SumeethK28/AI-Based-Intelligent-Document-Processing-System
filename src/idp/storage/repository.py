@@ -11,7 +11,15 @@ from typing import Any
 
 
 class DocumentRepository:
-    def __init__(self, db_path: str | Path = "data/idp.db") -> None:
+    def __init__(self, db_path: str | Path = "data/idp.db", *, session_token=None, _capability=None, _session_hash=None) -> None:
+        from idp.security import INTERNAL
+        from idp.security.access import AccessControl
+        self.internal = _capability is INTERNAL
+        self.session_token = session_token
+        self.session_hash = _session_hash
+        self._connection_depth = 0
+        self._security_pending = []
+        self.access = AccessControl(self)
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.initialize_database()
@@ -21,9 +29,20 @@ class DocumentRepository:
         migrate_review(self)
         from idp.storage.policy_migration import migrate_policy
         migrate_policy(self)
+        from idp.storage.security_migration import migrate_security
+        migrate_security(self)
+
+    def require(self, permission):
+        return self.access.require(permission)
+
+    def connect(self):
+        if not self.internal:
+            from idp.security.auth import AccessDenied
+            raise AccessDenied('Raw database access is reserved for server maintenance.')
+        return self._connect()
 
     @contextmanager
-    def connect(self) -> Iterator[sqlite3.Connection]:
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         """Commit/rollback and always close the SQLite connection (Windows-safe)."""
         connection = sqlite3.connect(self.db_path, timeout=10)
         from idp.utils.money import parse_money
@@ -33,12 +52,18 @@ class DocumentRepository:
         connection.create_function('idp_amount', 1, lambda data: float(value.amount) if (value := money(data)) else None)
         connection.create_function('idp_currency', 1, lambda data: value.currency if (value := money(data)) else None)
         try:
+            self._connection_depth += 1
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")
             with connection:
                 yield connection
         finally:
+            self._connection_depth -= 1
             connection.close()
+            if self._connection_depth == 0 and self._security_pending:
+                pending,self._security_pending=self._security_pending,[]
+                with self._connect() as audit:
+                    audit.executemany('INSERT INTO security_events(event_type,user_id,outcome,resource,created_at) VALUES(?,?,?,?,?)',pending)
 
     @staticmethod
     def timestamp() -> str:
@@ -60,7 +85,7 @@ class DocumentRepository:
         )
 
     def initialize_database(self) -> None:
-        with self.connect() as connection:
+        with self._connect() as connection:
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS documents (
@@ -93,7 +118,8 @@ class DocumentRepository:
             )
 
     def find_by_hash(self, file_hash: str) -> dict[str, Any] | None:
-        with self.connect() as connection:
+        self.require('process')
+        with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM documents WHERE file_hash = ?", (file_hash,)
             ).fetchone()
@@ -110,11 +136,12 @@ class DocumentRepository:
         operation_key: str | None = None,
     ) -> dict[str, Any]:
         """Create a unique document or record an exact duplicate upload."""
+        self.require('process')
         file_hash = self.calculate_hash(file_path)
         now = self.timestamp()
         result_json, extracted_json = self._encode_result(final_state)
 
-        with self.connect() as connection:
+        with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             if operation_key:
                 prior = connection.execute('SELECT id,document_id,is_duplicate FROM processing_runs WHERE operation_key=?', (operation_key,)).fetchone()
@@ -183,11 +210,12 @@ class DocumentRepository:
         Reprocessing resets the review decision. This schema keeps only the
         latest full result, not a snapshot per processing run.
         """
+        self.require('process')
         file_hash = self.calculate_hash(file_path)
         now = self.timestamp()
         result_json, extracted_json = self._encode_result(final_state)
 
-        with self.connect() as connection:
+        with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             if operation_key:
                 prior = connection.execute('SELECT id,document_id FROM processing_runs WHERE operation_key=?', (operation_key,)).fetchone()
@@ -251,30 +279,21 @@ class DocumentRepository:
         }
 
     def list_documents(self, limit: int = 100) -> list[dict[str, Any]]:
-        with self.connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT id, filename, document_type, workflow_status,
-                       assigned_department, review_decision, created_at
-                FROM documents ORDER BY id DESC LIMIT ?
-                """,
-                (max(1, min(limit, 1000)),),
-            ).fetchall()
-        return [dict(row) for row in rows]
+        self.require('documents')
+        scope,args=self.access.scope()
+        with self._connect() as db:
+            return [dict(row) for row in db.execute('SELECT d.id,d.filename,d.document_type,d.workflow_status,d.assigned_department,d.review_decision,d.created_at FROM documents d WHERE '+scope+' ORDER BY d.id DESC LIMIT ?',[*args,max(1,min(limit,1000))])]
 
     def list_processing_runs(self, limit: int = 100) -> list[dict[str, Any]]:
-        with self.connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT id, document_id, filename, is_duplicate, processed_at
-                FROM processing_runs ORDER BY id DESC LIMIT ?
-                """,
-                (max(1, min(limit, 1000)),),
-            ).fetchall()
-        return [dict(row) for row in rows]
+        self.require('documents')
+        scope,args=self.access.scope()
+        with self._connect() as db:
+            return [dict(row) for row in db.execute('SELECT r.* FROM processing_runs r JOIN documents d ON d.id=r.document_id WHERE '+scope+' ORDER BY r.id DESC LIMIT ?',[*args,max(1,min(limit,1000))])]
 
     def get_document(self, document_id: int) -> dict[str, Any] | None:
-        with self.connect() as connection:
+        if not self.internal:
+            self.access.document(document_id)
+        with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM documents WHERE id = ?", (document_id,)
             ).fetchone()
@@ -297,6 +316,7 @@ class DocumentRepository:
         return True
 
     def find_purchase_orders(self, po_number: str) -> list[dict[str, Any]]:
+        self.require('documents')
         """Return all stored POs with the same normalized PO identifier."""
         def normalize(value: str) -> str:
             return "".join(str(value).upper().split())
@@ -304,7 +324,7 @@ class DocumentRepository:
         target = normalize(po_number)
         if not target:
             return []
-        with self.connect() as connection:
+        with self._connect() as connection:
             rows = connection.execute(
                 """
                 SELECT id, filename, extracted_data
@@ -312,6 +332,11 @@ class DocumentRepository:
                 """,
                 ("purchase_order", target),
             ).fetchall()
+        if not self.internal:
+            scope,args=self.access.scope()
+            with self._connect() as db:
+                allowed={row[0] for row in db.execute('SELECT d.id FROM documents d WHERE '+scope,args)}
+            rows=[row for row in rows if row['id'] in allowed]
 
         matches = []
         for row in rows:

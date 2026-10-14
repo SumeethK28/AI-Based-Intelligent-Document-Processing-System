@@ -1,4 +1,5 @@
 """Versioned policy regression tests. Provider responses are simulated."""
+from idp.security import INTERNAL
 import copy
 import json
 import sqlite3
@@ -151,7 +152,7 @@ class PolicyTests(PipelineFixture):
             for table in ('policy_activations','policy_previews','policy_active','policy_versions'):
                 db.execute('DROP TABLE '+table)
             db.commit()
-        migrated=DocumentRepository(copy_path)
+        migrated=DocumentRepository(copy_path, _capability=INTERNAL)
         with migrated.connect() as db:
             self.assertEqual([tuple(row) for row in db.execute('SELECT * FROM documents')],before)
             self.assertEqual([tuple(row) for row in db.execute('SELECT * FROM processing_versions')],originals)
@@ -194,7 +195,7 @@ class PolicyTests(PipelineFixture):
     def test_policy_ui_draft_preview_activation_and_explanations(self):
         from streamlit.testing.v1 import AppTest
         self.invoice()
-        with patch.dict('os.environ',{'IDP_DATABASE_PATH':str(self.repo.db_path)}):
+        with patch('idp.ui.console.get_repository',return_value=self.repo), patch.dict('os.environ',{'IDP_DATABASE_PATH':str(self.repo.db_path)}):
             app=AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app/app.py'),default_timeout=30).run()
             app.radio(key='navigation').set_value('Business Rules').run()
             app.text_input(key='policy_actor').set_value('prototype:admin')

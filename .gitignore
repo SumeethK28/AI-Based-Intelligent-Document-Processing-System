@@ -25,6 +25,10 @@ env/
 .env.*
 !.env.example
 
+# Streamlit credentials (keep the shared server configuration tracked)
+.streamlit/secrets.toml
+.streamlit/secrets.*.toml
+
 
 # ==========================================
 # IDE / Editor

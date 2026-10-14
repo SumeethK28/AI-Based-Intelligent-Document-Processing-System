@@ -1,5 +1,6 @@
 
 from idp.agents.state import DocumentState
+from idp.security.document_safety import provider_text
 from idp.llm.provider import GroqProvider
 from idp.llm.schemas import AIClassificationResult
 
@@ -43,7 +44,7 @@ Return a JSON object matching the schema.
             system_prompt=system_prompt,
             user_prompt=(
                 "Classify this OCR document:\n\n"
-                f"{state['ocr_text']}"
+                f"{provider_text(state['ocr_text'],classification=True)}"
             ),
             response_model=AIClassificationResult,
         )

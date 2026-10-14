@@ -11,6 +11,7 @@ from idp.batch.service import BatchService, TERMINAL
 
 
 def bulk_page(repository, pipeline_factory, record_table):
+    repository.require('batches')
     service = BatchService(repository)
     st.info('Document text is sent to Groq when processing starts. Use authorized files only.')
     st.caption('Up to 50 PDF/PNG/JPEG files, 20 MB each, 100 MB and 100 pages per batch, 10 pages per PDF. ZIP is not supported.')
@@ -58,14 +59,15 @@ def bulk_page(repository, pipeline_factory, record_table):
     if current:
         status.info('Processing: '+', '.join(current))
     st.caption('Processing is serial. This button runs locally while the application is running. To continue independently of the browser, use the explicit local worker described in docs/milestone3_operations.md. Refresh reads persisted progress; shutdown requires starting the worker again.')
-    if st.button('Start / resume batch',disabled=not (counts['queued'] or counts['processing']),type='primary'):
+    consent=st.checkbox('I authorize external Groq processing of the OCR text in this batch.',key='batch_ai_consent') if not repository.internal else True
+    if st.button('Start / resume batch',disabled=not consent or not (counts['queued'] or counts['processing']),type='primary'):
         def update(item,state):
             status.info(f"{item['filename']} · {state.replace('_',' ')}")
             current_items = service.items(selected)
             done = sum(value['state'] in TERMINAL for value in current_items)
             progress_bar.progress(done/len(items),text=f'{done} of {len(items)} finished')
         try:
-            service.run(pipeline_factory,selected,progress=update)
+            service.run(pipeline_factory,selected,progress=update,ai_consent=consent)
             st.rerun()
         except RuntimeError:
             st.info('Another worker is running. Refresh to monitor its progress.')
@@ -79,8 +81,13 @@ def bulk_page(repository, pipeline_factory, record_table):
         st.json(summary['distributions'])
         record_table(summary['financial_totals'])
         st.caption('Unique invoice values by currency and safety category. Duplicate uploads are counted once. These are extracted values, not paid balances.')
-    st.download_button('Download batch JSON',json.dumps(summary,indent=2),file_name=f'batch_{selected}.json',mime='application/json')
-    st.download_button('Download batch CSV',service.csv(summary['items']),file_name=f'batch_{selected}.csv',mime='text/csv')
+    if repository.internal:
+        st.download_button('Download batch JSON',json.dumps(summary,indent=2),file_name=f'batch_{selected}.json',mime='application/json')
+        st.download_button('Download batch CSV',service.csv(summary['items']),file_name=f'batch_{selected}.csv',mime='text/csv')
+    else:
+        from idp.ui.security import download_control
+        download_control(repository,'Download batch JSON','batch_json',{'batch_id':selected},'secure_batch_json')
+        download_control(repository,'Download batch CSV','batch_csv',{'batch_id':selected},'secure_batch_csv')
     chosen = st.selectbox('Inspect batch item',[item['id'] for item in items],format_func=lambda key:next(item['filename'] for item in items if item['id']==key),key='batch_item')
     item = next(item for item in items if item['id']==chosen)
     if item['safe_error']:
@@ -97,20 +104,27 @@ def bulk_page(repository, pipeline_factory, record_table):
         from idp.ui.console import document_detail
         document = repository.get_document(item['document_id'])
         document_detail(repository,document,'batch',run_id=item['run_id'])
-    st.caption('Retained sources stay local beside this database. They are eligible for explicit cleanup after 30 days; no automatic deletion occurs. Protect this local folder with your account permissions. This prototype does not add authentication or encryption.')
+    st.caption('Retained sources stay local. Authentication and department scope are enforced; operating-system storage permissions and disk encryption remain necessary. Sources with active cases or audit references cannot be cleaned up.')
 
 
 def retained_details(repository, document_id, record_table, *, expanded=False):
+    repository.access.document(document_id)
     service = BatchService(repository)
-    with repository.connect() as db:
+    with repository._connect() as db:
         items = [dict(row) for row in db.execute('''SELECT i.*,b.name AS batch_name FROM batch_items i
             JOIN batch_jobs b ON b.id=i.batch_id WHERE i.document_id=? ORDER BY i.id DESC''',(document_id,))]
     with st.expander('Batch membership and retained source',expanded=expanded):
         if not items:
             st.caption('No retained batch source exists for this legacy or single-document upload.')
             return
-        record_table([{key:item[key] for key in ('batch_id','batch_name','state','run_id','retain_until')} for item in items])
+        keys=('batch_id','batch_name','state','run_id','retain_until') if repository.internal or repository.access.principal()['role']=='Administrator' else ('state','run_id','retain_until')
+        record_table([{key:item[key] for key in keys} for item in items])
         item = items[0]
+        if not repository.internal:
+            from idp.ui.security import download_control
+            st.caption('Sensitive source previews are not placed in Streamlit public media storage. Request an authorized, hash-verified source download.')
+            download_control(repository,'Download retained source','source',{'item_id':item['id']},f'secure_source_{document_id}')
+            return
         try:
             path = service.source(item)
             data = path.read_bytes()

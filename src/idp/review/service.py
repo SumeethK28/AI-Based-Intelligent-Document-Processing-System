@@ -43,8 +43,21 @@ class ReviewService:
             'policy_version_id','rule_outcomes','policy_failed_rules','policy_latency_ms','policy_evaluation_error')}
 
     def validate(self, state):
+        checks_repository=self.repository
+        if not self.repository.internal:
+            self.repository.access.document(state.get('document_id'),'review',mutation=True)
+            from idp.security import INTERNAL
+            from idp.storage.repository import DocumentRepository
+            checks_repository=DocumentRepository(self.repository.db_path,_capability=INTERNAL)
+            original=checks_repository.get_document(state['document_id'])['full_result']
+            if state.get('ocr_text')!=original.get('ocr_text'):
+                from idp.security.auth import AccessDenied
+                raise AccessDenied('Original OCR evidence cannot be supplied or changed by a caller.')
+            if self.repository.access.principal()['role']!='Administrator' and state.get('policy_version_id')!=original.get('policy_version_id'):
+                from idp.security.auth import AccessDenied
+                raise AccessDenied('Only explicit administrator reevaluation may change the recorded policy.')
         from idp.policy.service import PolicyService
-        policy = PolicyService(self.repository)
+        policy = PolicyService(checks_repository)
         try:
             result = policy.bind(state)
         except Exception:
@@ -66,10 +79,15 @@ class ReviewService:
                 result['anomalies'].append(item)
         if state.get('risk_level')=='high' or any(item.get('severity')=='high' for item in result['anomalies']):
             result['risk_level']='high'
-        result.update(CrossDocumentAgent(self.repository).run(result))
+        if not self.repository.internal and self.repository.access.principal()['role']!='Administrator' and not result.get('validation_passed'):
+            issue={'code':'INCOMPLETE_COMPARISON','severity':'medium','description':'Verify this document and its original evidence before purchase-order comparison. No unrelated PO information is disclosed.'}
+            result.update(cross_document_status='incomplete' if result.get('extracted_fields',{}).get('po_reference') else 'not_checked',
+                cross_document_issues=[issue] if result.get('extracted_fields',{}).get('po_reference') else [],matched_document_id=None)
+        else:
+            result.update(CrossDocumentAgent(checks_repository).run(result))
         linked_id=result.get('matched_document_id')
         if linked_id and result.get('cross_document_status')=='matched':
-            linked=self.repository.get_document(linked_id)
+            linked=checks_repository.get_document(linked_id)
             po=linked['full_result'] if linked else {}
             if not linked or linked['review_decision'] in {'rejected','needs_correction','escalated'} or not po.get('validation_passed') or po.get('requires_review') or po.get('risk_level')!='low':
                 issue={'code':'PO_REVIEW_BLOCK','severity':'medium','description':'The referenced PO is rejected or requires validation/review. Escalate or resolve the PO before invoice approval.'}
@@ -81,6 +99,7 @@ class ReviewService:
         return result
 
     def preview_correction(self, document_id, changes, evidence):
+        self.repository.access.actor(None,'review',document_id)
         document = self.repository.get_document(document_id)
         if not document:
             raise ValueError('Document is no longer available.')
@@ -119,8 +138,9 @@ class ReviewService:
         result = self.validate(state)
         return {'revision':document['revision'],'processing_version_id':document['processing_version_id'],'state':result,'changed_fields':changed}
 
-    @staticmethod
-    def _current(db, document_id, expected_revision):
+    def _current(self, db, document_id, expected_revision):
+        if not self.repository.internal:
+            self.repository.access.document(document_id,'review',mutation=True)
         row = db.execute('SELECT * FROM documents WHERE id=?',(document_id,)).fetchone()
         if not row:
             raise ValueError('Document is no longer available.')
@@ -130,22 +150,25 @@ class ReviewService:
 
     def event(self, db, document, event_type, previous, new, actor, reason, notes='',decision=None,state=None):
         updated = db.execute('SELECT revision FROM documents WHERE id=?',(document['id'],)).fetchone()[0]
-        return db.execute('''INSERT INTO review_events(document_id,processing_version_id,event_type,previous_values,new_values,
+        event_id = db.execute('''INSERT INTO review_events(document_id,processing_version_id,event_type,previous_values,new_values,
             actor,actor_kind,created_at,decision,reason,notes,validation_results,rule_versions,previous_revision,new_revision)
             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
             (document['id'],document['processing_version_id'],event_type,json.dumps(previous,ensure_ascii=False),json.dumps(new,ensure_ascii=False),
-             actor.strip(),'system' if actor.startswith('system:') else 'prototype_operator',self.repository.timestamp(),decision,reason.strip(),notes[:8000],
+             actor.strip(),'system' if actor.startswith('system:') else 'prototype_operator' if self.repository.internal else 'authenticated_user',self.repository.timestamp(),decision,reason.strip(),notes[:8000],
              json.dumps(self.validation_summary(state or json.loads(document['full_result']))),
              json.dumps({'policy_version_id':(state or json.loads(document['full_result'])).get('policy_version_id')}),document['revision'],updated)).lastrowid
+        self.repository.access.attribution(db,'review_events',event_id)
+        return event_id
 
     def apply_correction(self, document_id, expected_revision, changes, evidence, *, actor, reason, notes=''):
+        actor=self.repository.access.actor(actor,'review',document_id)
         self.identity(actor,reason)
         preview = self.preview_correction(document_id,changes,evidence)
         if preview['revision']!=expected_revision:
             raise ReviewConflict('This correction preview is stale. Refresh before saving.')
         if not preview['changed_fields']:
             raise ValueError('No field or evidence changes were provided.')
-        with self.repository.connect() as db:
+        with self.repository._connect() as db:
             db.execute('BEGIN IMMEDIATE')
             document = self._current(db,document_id,expected_revision)
             state = self.validate(preview['state'])
@@ -153,6 +176,8 @@ class ReviewService:
             for key in preview['changed_fields']:
                 provenance[key]={'source':'human_correction','prototype_operator':actor.strip(),
                     'recorded_at':self.repository.timestamp(),'processing_version_id':document['processing_version_id']}
+                if not self.repository.internal:
+                    provenance[key].update(actor_kind='authenticated_user',actor_user_id=self.repository.access.principal()['id'])
             original = json.loads(document['full_result'])
             db.execute('''UPDATE documents SET full_result=?,extracted_data=?,workflow_status=?,assigned_department=?,
                 review_decision='pending',review_notes=NULL,updated_at=? WHERE id=?''',
@@ -165,10 +190,11 @@ class ReviewService:
         return event_id
 
     def decide(self, document_id, expected_revision, decision, *, actor, reason, notes=''):
+        actor=self.repository.access.actor(actor,'review',document_id)
         self.identity(actor,reason)
         if decision not in {'approved','rejected','needs_correction','escalated'}:
             raise ValueError('Unsupported review decision.')
-        with self.repository.connect() as db:
+        with self.repository._connect() as db:
             db.execute('BEGIN IMMEDIATE')
             document = self._current(db,document_id,expected_revision)
             state = json.loads(document['full_result'])
@@ -177,6 +203,9 @@ class ReviewService:
             if decision=='approved' and (not state.get('validation_passed') or state.get('requires_review')
                 or state.get('risk_level')!='low' or state.get('cross_document_issues')
                 or state.get('cross_document_status') in {'unmatched','ambiguous','mismatch','incomplete'}):
+                if not self.repository.internal:
+                    from idp.security.auth import AuthService
+                    AuthService(self.repository).event('blocked_review_approval','denied','review',self.repository.access.principal()['id'])
                 raise UnsafeApproval('Approval blocked: resolve mandatory fields, evidence, PO and risk issues or escalate the case.')
             if decision in {'needs_correction','escalated'}:
                 state.update(workflow_status='manual_review',assigned_department='Document Review',requires_review=True,
@@ -210,8 +239,14 @@ class ReviewService:
                 {'decision':decision,'cross_document_status':'incomplete'},'system:review-dependency',reason,decision=decision,state=state)
 
     def manage(self, document_id, expected_revision, action, *, actor, reason, team=None, assignee=None, status=None, priority=None):
+        actor=self.repository.access.actor(actor,'assign' if action=='assign' else 'review',document_id)
+        if action=='assign' and not self.repository.internal and assignee:
+            with self.repository._connect() as db:
+                accounts=db.execute('SELECT id,username,role,departments FROM users WHERE active=1').fetchall()
+            valid=any(assignee==f"user:{row['id']}:{row['username']}" and (row['role']=='Administrator' or team in json.loads(row['departments']) and row['role'].endswith('Reviewer')) for row in accounts)
+            if not valid: raise ValueError('Assign only to an active authenticated reviewer authorized for that team.')
         self.identity(actor,reason)
-        with self.repository.connect() as db:
+        with self.repository._connect() as db:
             db.execute('BEGIN IMMEDIATE')
             document = self._current(db,document_id,expected_revision)
             case = dict(db.execute('SELECT * FROM review_cases WHERE document_id=?',(document_id,)).fetchone())
@@ -244,7 +279,8 @@ class ReviewService:
             return self.event(db,document,action,previous,case,actor,reason)
 
     def history(self, document_id):
-        with self.repository.connect() as db:
+        self.repository.access.document(document_id)
+        with self.repository._connect() as db:
             rows = [dict(row) for row in db.execute('SELECT * FROM review_events WHERE document_id=? ORDER BY id DESC',(document_id,))]
         for row in rows:
             for key in ('previous_values','new_values','validation_results','rule_versions'):
@@ -252,12 +288,15 @@ class ReviewService:
         return rows
 
     def case(self, document_id):
-        with self.repository.connect() as db:
+        self.repository.access.document(document_id)
+        with self.repository._connect() as db:
             row = db.execute('SELECT * FROM review_cases WHERE document_id=?',(document_id,)).fetchone()
         return dict(row) if row else None
 
     def queue(self, filters=DocumentFilters(), *, team='', risk='', case_status='', assignee='', page=1, include_closed=False):
         where, parameters = OperationsQueries._where(filters)
+        from idp.security.access import scoped_where
+        where,parameters=scoped_where(self.repository,where,parameters,'review')
         extra=[]
         if not include_closed and case_status not in {'approved','rejected'}:
             extra.append("c.case_status NOT IN ('approved','rejected')")
@@ -274,7 +313,7 @@ class ReviewService:
         if extra:
             where += (' AND ' if where else ' WHERE ')+' AND '.join(extra)
         query = ' FROM documents d JOIN review_cases c ON c.document_id=d.id'
-        with self.repository.connect() as db:
+        with self.repository._connect() as db:
             total = db.execute('SELECT count(*)'+query+where,parameters).fetchone()[0]
             rows=[dict(row) for row in db.execute('''SELECT d.id,d.filename,d.document_type,d.workflow_status,d.review_decision,
                 d.created_at,d.revision,c.team,c.assignee,c.case_status,c.priority,json_extract(d.full_result,'$.risk_level') AS risk,

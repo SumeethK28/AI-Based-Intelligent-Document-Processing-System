@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 
 def migrate(repository):
-    with repository.connect() as db:
+    with repository._connect() as db:
         if db.execute("SELECT 1 FROM sqlite_master WHERE name='batch_jobs'").fetchone():
             return
         if db.execute('SELECT count(*) FROM documents').fetchone()[0]:

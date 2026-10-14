@@ -1,4 +1,5 @@
 """Actual SQLite, ingestion and LangGraph; all model responses are simulated."""
+from idp.security import INTERNAL
 import io
 import json
 import sqlite3
@@ -43,7 +44,7 @@ class BatchTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.repo = DocumentRepository(self.root/'test.db')
+        self.repo = DocumentRepository(self.root/'test.db', _capability=INTERNAL)
         self.service = BatchService(self.repo)
         self.llm = FakeLLM()
         self.failure_markers = set()
@@ -58,7 +59,7 @@ class BatchTests(unittest.TestCase):
             self.llm.kind, self.llm.fields = kind, fields
             return SimpleNamespace(extracted_data=None,classification=SimpleNamespace(document_class=SimpleNamespace(value=kind)),
                                    ocr=SimpleNamespace(full_text='\n'.join(fields.values()),average_confidence=1))
-        self.pipeline = AgenticDocumentPipeline(self.repo.db_path,baseline=SimpleNamespace(process=baseline),llm=self.llm)
+        self.pipeline = AgenticDocumentPipeline(self.repo.db_path,baseline=SimpleNamespace(process=baseline),llm=self.llm, _capability=INTERNAL)
 
     def submit(self,*markers,key='request',force=False):
         return self.service.submit([(marker+'.pdf',pdf(marker)) for marker in markers],request_key=key,force=force)
@@ -122,7 +123,8 @@ class BatchTests(unittest.TestCase):
         script = '''import os,sys
 from idp.storage.repository import DocumentRepository
 from idp.batch.service import worker_lock
-repo=DocumentRepository(sys.argv[1])
+from idp.security import INTERNAL
+repo=DocumentRepository(sys.argv[1], _capability=INTERNAL)
 with worker_lock(repo.db_path):
     with repo.connect() as db:
         db.execute("UPDATE batch_items SET state='processing',attempts=1 WHERE id=?",(int(sys.argv[2]),))
@@ -132,7 +134,7 @@ with worker_lock(repo.db_path):
         crashed = subprocess.run([sys.executable,'-c',script,str(self.repo.db_path),str(item['id'])],capture_output=True,timeout=20)
         self.assertEqual(crashed.returncode,17)
         calls = self.llm.calls
-        reopened = BatchService(DocumentRepository(self.repo.db_path))
+        reopened = BatchService(DocumentRepository(self.repo.db_path, _capability=INTERNAL))
         reopened.run(lambda:self.pipeline,job)
         self.assertEqual(reopened.items(job)[0]['run_id'],result['run_id'])
         self.assertEqual(self.llm.calls,calls)
@@ -147,7 +149,7 @@ with worker_lock(repo.db_path):
         self.failure_markers.add('receipt')
         job = self.submit('receipt')
         self.run_job(job)
-        with patch.dict('os.environ',{'IDP_DATABASE_PATH':str(self.repo.db_path)}),patch('idp.ui.console.get_pipeline',return_value=self.pipeline):
+        with patch('idp.ui.console.get_repository',return_value=self.repo), patch.dict('os.environ',{'IDP_DATABASE_PATH':str(self.repo.db_path)}),patch('idp.ui.console.get_pipeline',return_value=self.pipeline):
             app = AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app/app.py'), default_timeout=30).run(timeout=30)
             app.radio(key='navigation').set_value('Bulk Processing').run()
             self.assertEqual(app.metric[3].value,'1')
@@ -360,12 +362,12 @@ with worker_lock(repo.db_path):
             db.execute("INSERT INTO processing_runs VALUES(1,1,'original',0,'date')")
             before = tuple(db.execute('SELECT * FROM documents').fetchone())
             db.commit()
-        repository = DocumentRepository(legacy)
+        repository = DocumentRepository(legacy, _capability=INTERNAL)
         with repository.connect() as db:
             self.assertEqual(tuple(db.execute('SELECT * FROM documents').fetchone())[:len(before)],before)
             self.assertEqual(db.execute('PRAGMA foreign_key_check').fetchall(),[])
         self.assertEqual(len(list(self.root.glob('legacy.db.before_batch_v1.*.db'))),1)
-        DocumentRepository(legacy)
+        DocumentRepository(legacy, _capability=INTERNAL)
         self.assertEqual(len(list(self.root.glob('legacy.db.before_batch_v1.*.db'))),1)
 
 

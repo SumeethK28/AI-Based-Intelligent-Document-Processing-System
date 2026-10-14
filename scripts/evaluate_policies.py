@@ -1,4 +1,5 @@
 """Reproducible deterministic policy comparison; no live model or OCR accuracy claim."""
+from idp.security import INTERNAL
 import argparse
 import copy
 import hashlib
@@ -44,7 +45,7 @@ def check(repository,state,config=None,version_id=None):
 
 def evaluate(output):
     output.mkdir(parents=True,exist_ok=False)
-    repository=DocumentRepository(output/'uat.db')
+    repository=DocumentRepository(output/'uat.db', _capability=INTERNAL)
     service=PolicyService(repository)
     po=fixture('purchase_order',{'po_number':'PO-EVAL','order_date':'2026-10-01','vendor':'Supplier','total':'INR 100.00'})
     source=output/'po_source.txt'; source.write_text('Synthetic evaluation PO; not a business transaction.')
@@ -111,7 +112,7 @@ def evaluate(output):
         with closing(sqlite3.connect(f'file:{original.resolve().as_posix()}?mode=ro',uri=True)) as db:
             before={table:db.execute('SELECT * FROM '+table).fetchall() for table in ('documents','processing_runs','processing_versions','review_events') if db.execute('SELECT 1 FROM sqlite_master WHERE name=?',(table,)).fetchone()}
             with closing(sqlite3.connect(copy_path)) as target: db.backup(target)
-        migrated=DocumentRepository(copy_path)
+        migrated=DocumentRepository(copy_path, _capability=INTERNAL)
         with migrated.connect() as db:
             preserved=all([tuple(row)[:len(records[0])] for row in db.execute('SELECT * FROM '+table)]==records if records else db.execute('SELECT count(*) FROM '+table).fetchone()[0]==0 for table,records in before.items())
             integrity=db.execute('PRAGMA integrity_check').fetchone()[0]

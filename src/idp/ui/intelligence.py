@@ -6,7 +6,9 @@ from idp.storage.intelligence import IntelligenceQueries
 
 def dashboard(queries):
     from idp.ui.console import filters_ui,record_table
-    data=IntelligenceQueries(queries.repository).report(filters_ui(queries,'analytics',search=True))
+    selection=filters_ui(queries,'analytics',search=True)
+    st.session_state['_analytics_selection']=selection
+    data=IntelligenceQueries(queries.repository).report(selection)
     a,b,c=st.columns(3)
     a.metric('Unique documents',data['unique_documents'])
     b.metric('Eligible for departmental processing',data['eligible_documents'])
@@ -47,4 +49,10 @@ def dashboard(queries):
         for definition in data['definitions'].values():
             st.write(definition)
         st.write('Single-upload failures before persistence are not recorded and cannot be measured. No realized savings, staffing reductions, revenue or historical human effort are inferred.')
-    st.download_button('Export analytics (JSON)',json.dumps(data,indent=2),file_name='document_analytics.json',mime='application/json')
+    if queries.repository.internal:
+        st.download_button('Export analytics (JSON)',json.dumps(data,indent=2),file_name='document_analytics.json',mime='application/json')
+    else:
+        from idp.ui.security import download_control
+        from dataclasses import asdict
+        values={key:value.isoformat() if hasattr(value,'isoformat') else value for key,value in asdict(selection).items()}
+        download_control(queries.repository,'Export analytics (JSON)','analytics_json',{'filters':values},'secure_analytics')

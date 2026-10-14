@@ -3,6 +3,7 @@
 Run from the project root. All artifacts and the isolated DB go under results;
 the production database and prior evaluations are never modified.
 """
+from idp.security import INTERNAL
 import json
 import platform
 import statistics
@@ -60,7 +61,7 @@ def main():
                          "expected_validation": valid, "expected_department": department, "expected_anomalies": anomalies})
     (output / "ground_truth.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     provider = GroqProvider()
-    pipeline = AgenticDocumentPipeline(output / "evaluation.db", llm=provider)
+    pipeline = AgenticDocumentPipeline(output / "evaluation.db", llm=provider, _capability=INTERNAL)
     report = {"python": platform.python_version(), "model": provider.model, "dataset_size": len(CASES),
               "conditions": "Real RapidOCR and configured Groq; eight generated synthetic PNGs, serial calls, isolated fresh SQLite DB. Timings exclude initialization and 15-second inter-document pacing.",
               "limitations": "Synthetic single-page English documents in one clean layout; no real-world scan variability or broad accuracy claim. Contracts test metadata support, not legal validity. No mocks in this evaluation.", "documents": []}

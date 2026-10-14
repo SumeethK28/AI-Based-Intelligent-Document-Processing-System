@@ -1,4 +1,5 @@
 """Real SQLite/deterministic agents; no live provider calls or production writes."""
+from idp.security import INTERNAL
 import json
 import sqlite3
 import tempfile
@@ -20,7 +21,7 @@ class ReviewTests(unittest.TestCase):
         self.temp=tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root=Path(self.temp.name)
-        self.repo=DocumentRepository(self.root/'review.db')
+        self.repo=DocumentRepository(self.root/'review.db', _capability=INTERNAL)
         self.service=ReviewService(self.repo)
         self.counter=0
 
@@ -229,7 +230,7 @@ class ReviewTests(unittest.TestCase):
         self.addCleanup(st.cache_resource.clear)
         id=self.create()
         self.service.manage(id,self.revision(id),'claim',actor='alice',reason='Inspection')
-        with patch.dict('os.environ',{'IDP_DATABASE_PATH':str(self.repo.db_path)}):
+        with patch('idp.ui.console.get_repository',return_value=self.repo), patch.dict('os.environ',{'IDP_DATABASE_PATH':str(self.repo.db_path)}):
             for _ in range(2):
                 app=AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app/app.py'), default_timeout=30).run(timeout=30)
                 app.radio(key='navigation').set_value('Review Center').run(timeout=30)

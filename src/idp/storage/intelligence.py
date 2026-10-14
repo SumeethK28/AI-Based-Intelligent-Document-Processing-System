@@ -23,7 +23,9 @@ class IntelligenceQueries:
 
     def report(self,filters=DocumentFilters()):
         where,args=OperationsQueries._where(filters)
-        with self.repository.connect() as db:
+        from idp.security.access import scoped_where
+        where,args=scoped_where(self.repository,where,args)
+        with self.repository._connect() as db:
             rows=db.execute('SELECT d.* FROM documents d'+where+' ORDER BY d.id',args).fetchall()
             runs=db.execute('SELECT r.* FROM processing_runs r JOIN documents d ON d.id=r.document_id'+where,args).fetchall()
             events=db.execute('SELECT e.* FROM review_events e JOIN documents d ON d.id=e.document_id'+where,args).fetchall()
@@ -39,6 +41,12 @@ class IntelligenceQueries:
             batch_where=' WHERE '+' AND '.join(clauses) if clauses else ''
             items=db.execute('SELECT i.* FROM batch_items i JOIN batch_jobs j ON j.id=i.batch_id'+batch_where,parameters).fetchall()
             attempts=db.execute('SELECT a.* FROM batch_attempts a JOIN batch_items i ON i.id=a.item_id JOIN batch_jobs j ON j.id=i.batch_id'+batch_where,parameters).fetchall()
+            if not self.repository.internal and self.repository.access.principal()['role']!='Administrator':
+                scope,scope_args=self.repository.access.scope()
+                allowed={row[0] for row in db.execute('SELECT d.id FROM documents d WHERE '+scope,scope_args)}
+                items=[item for item in items if item['document_id'] in allowed]
+                item_ids={item['id'] for item in items}
+                attempts=[attempt for attempt in attempts if attempt['item_id'] in item_ids]
         groups=defaultdict(lambda:[Decimal('0'),0])
         types=Counter(); validation=Counter(); anomalies=Counter(); policies=Counter(); teams=Counter(); age=Counter()
         eligible=escalated=high=0; duplicates=[]; latencies=[]
@@ -91,14 +99,14 @@ class IntelligenceQueries:
             if isinstance(seconds,(int,float)) and seconds>=0:
                 latencies.append(seconds)
         corrected={row['document_id'] for row in events if row['event_type']=='correction'}
-        intervened={row['document_id'] for row in events if row['actor_kind']=='prototype_operator'}
+        intervened={row['document_id'] for row in events if row['actor_kind'] in {'prototype_operator','authenticated_user'}}
         duplicate_counts=Counter(duplicates)
         batch_states=Counter(row['state'] for row in items)
         terminal=sum(batch_states[key] for key in ('completed','duplicate','review_required','failed'))
         successful=sum(batch_states[key] for key in ('completed','duplicate','review_required'))
         financial={dimension:[{'currency':currency,'category':key,'invoice_count':count,'extracted_value':format(value,'.2f')} for (group,currency,key),(value,count) in sorted(groups.items()) if group==dimension] for dimension in ('currency','supplier','day','po','high_value')}
         ratio=lambda numerator,denominator: numerator/denominator if denominator else None
-        return {'definitions':{
+        report = {'definitions':{
             'document_cohort':'All matching unique current documents received in the selected UTC dates; financial totals use latest extracted fields, once per source hash.',
             'financial':'Nominal extracted invoice values; currencies never summed together; unparseable totals excluded; unspecified currency remains separate. Eligibility and approval are not payment, revenue or execution.',
             'activity':'All recorded runs and review events for the selected document cohort, including later events. Historical pre-migration events and durations remain unavailable.',
@@ -121,3 +129,10 @@ class IntelligenceQueries:
                 'success_rate':ratio(successful,terminal),'failure_rate':ratio(batch_states['failed'],terminal),
                 'retried_items':sum(row['attempts']>1 for row in items),'retry_rate':ratio(sum(row['attempts']>1 for row in items),len(items)),
                 'attempts':len(attempts),'failed_attempts':sum(row['state']=='failed' for row in attempts)}}
+        if not self.repository.internal:
+            report['definitions']['batch_cohort']+=' Nonadministrators see only items linked to authorized documents; unlinked queued/failed items are excluded.'
+            if self.repository.access.principal()['role']=='Operations Manager':
+                report['financial']['supplier']=[]
+                report['duplicate_business_groups']=[]
+                report['definitions']['financial']+=' Operations managers receive summary-only views; supplier names and duplicate identifiers are withheld.'
+        return report

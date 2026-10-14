@@ -1,4 +1,5 @@
 """End-to-end LangGraph → storage → human correction → reprocessing; simulated Groq."""
+from idp.security import INTERNAL
 import json
 import tempfile
 import unittest
@@ -18,7 +19,7 @@ class ReviewIntegrationTests(unittest.TestCase):
             def baseline(path):
                 return SimpleNamespace(extracted_data=None,classification=SimpleNamespace(document_class=SimpleNamespace(value=llm.kind)),
                     ocr=SimpleNamespace(full_text='\n'.join(llm.fields.values())+'\nINR 110.00',average_confidence=1))
-            pipeline=AgenticDocumentPipeline(root/'test.db',baseline=SimpleNamespace(process=baseline),llm=llm)
+            pipeline=AgenticDocumentPipeline(root/'test.db',baseline=SimpleNamespace(process=baseline),llm=llm, _capability=INTERNAL)
             llm.kind='purchase_order'
             llm.fields={'po_number':'PO-1','order_date':'2026-10-01','vendor':'Supplier','total':'INR 110.00'}
             po=root/'po.txt'

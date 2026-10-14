@@ -27,6 +27,10 @@ class OperationsQueries:
     def __init__(self, repository: DocumentRepository):
         self.repository = repository
 
+    def _scoped(self,filters,permission='analytics'):
+        from idp.security.access import scoped_where
+        return scoped_where(self.repository,*self._where(filters),permission)
+
     @staticmethod
     def _where(filters: DocumentFilters) -> tuple[str, list[Any]]:
         clauses, parameters = [], []
@@ -63,14 +67,15 @@ class OperationsQueries:
         return (" WHERE " + " AND ".join(clauses) if clauses else ""), parameters
 
     def options(self) -> dict[str, list[str]]:
-        with self.repository.connect() as connection:
-            return {key: [row[0] for row in connection.execute(f"SELECT DISTINCT {column} FROM documents ORDER BY {column}")]
+        scope,args=self.repository.access.scope()
+        with self.repository._connect() as connection:
+            return {key: [row[0] for row in connection.execute(f"SELECT DISTINCT d.{column} FROM documents d WHERE {scope} ORDER BY d.{column}",args)]
                     for key, column in (("department", "assigned_department"), ("document_type", "document_type"),
                                         ("status", "workflow_status"), ("review_decision", "review_decision"))}
 
     def overview(self, filters: DocumentFilters = DocumentFilters()) -> dict[str, Any]:
-        where, parameters = self._where(filters)
-        with self.repository.connect() as connection:
+        where, parameters = self._scoped(filters)
+        with self.repository._connect() as connection:
             counts = dict(connection.execute("""
                 SELECT COUNT(*) AS unique_documents,
                   coalesce(sum(json_extract(d.full_result, '$.validation_passed') = 1), 0) AS validated,
@@ -102,15 +107,16 @@ class OperationsQueries:
                 SELECT substr(r.processed_at, 1, 10) AS day, COUNT(*) AS submissions,
                 sum(r.is_duplicate) AS duplicates FROM processing_runs r JOIN documents d ON d.id = r.document_id
                 """ + where + " GROUP BY substr(r.processed_at, 1, 10) ORDER BY day", parameters)]
+        if not self.repository.internal and self.repository.access.principal()['role']=='Operations Manager': activity=[]
         return {**counts, **distributions, "departments": departments, "activity": activity, "daily": daily,
                 "invoice_values": self.invoice_values(filters)}
 
     def page(self, filters: DocumentFilters = DocumentFilters(), *, page: int = 1, page_size: int = 20,
              sort: str = "Newest first") -> tuple[list[dict[str, Any]], int]:
-        where, parameters = self._where(filters)
+        where, parameters = self._scoped(filters,'documents')
         page_size = max(1, min(page_size, 100))
         ordering = {"Newest first": "d.id DESC", "Oldest first": "d.id ASC", "Filename": "d.filename COLLATE NOCASE ASC, d.id ASC"}.get(sort, "d.id DESC")
-        with self.repository.connect() as connection:
+        with self.repository._connect() as connection:
             total = connection.execute("SELECT COUNT(*) FROM documents d" + where, parameters).fetchone()[0]
             rows = connection.execute("""
                 SELECT d.id, d.filename, d.document_type, d.workflow_status, d.assigned_department,
@@ -122,13 +128,17 @@ class OperationsQueries:
         return [dict(row) for row in rows], total
 
     def document_runs(self, document_id: int) -> list[dict[str, Any]]:
-        with self.repository.connect() as connection:
+        self.repository.access.document(document_id)
+        with self.repository._connect() as connection:
             return [dict(row) for row in connection.execute(
                 "SELECT id, filename, is_duplicate, processed_at, result_snapshot IS NOT NULL AS snapshot_available FROM processing_runs WHERE document_id = ? ORDER BY id DESC", (document_id,))]
 
     def export(self, filters=DocumentFilters(), limit=5000):
-        where, parameters = self._where(filters)
-        with self.repository.connect() as db:
+        where, parameters = self._scoped(filters,'export')
+        if not self.repository.internal:
+            from idp.security.auth import AuthService
+            AuthService(self.repository).event('sensitive_export','allowed','filtered_documents',self.repository.access.principal()['id'])
+        with self.repository._connect() as db:
             total = db.execute('SELECT count(*) FROM documents d'+where,parameters).fetchone()[0]
             if total > limit:
                 raise ValueError('Export is limited to 5,000 records. Narrow your filters.')
@@ -137,19 +147,19 @@ class OperationsQueries:
         return [{**dict(row),'extracted_data':json.loads(row['extracted_data'])} for row in rows]
 
     def exceptions(self, filters: DocumentFilters) -> list[dict[str, Any]]:
-        where, parameters = self._where(filters)
+        where, parameters = self._scoped(filters,'documents')
         where += " AND " if where else " WHERE "
         where += "d.review_decision = 'pending' AND d.workflow_status IN ('manual_review', 'anomaly_review', 'unclassified_review')"
-        with self.repository.connect() as connection:
+        with self.repository._connect() as connection:
             return [dict(row) for row in connection.execute(
                 "SELECT d.id, d.filename, d.document_type, d.assigned_department, d.workflow_status FROM documents d" + where + " ORDER BY d.created_at ASC, d.id ASC LIMIT 10", parameters)]
 
     def invoice_values(self, filters: DocumentFilters) -> list[dict[str, Any]]:
         import json
-        where, parameters = self._where(filters)
+        where, parameters = self._scoped(filters)
         where += " AND d.document_type = 'invoice'" if where else " WHERE d.document_type = 'invoice'"
         totals: dict[tuple[str, str], tuple[Decimal, int]] = {}
-        with self.repository.connect() as connection:
+        with self.repository._connect() as connection:
             # Stream only monetary data and decision flags, not entire OCR/agent states.
             for row in connection.execute("""
                 SELECT d.extracted_data, d.review_decision, d.workflow_status,

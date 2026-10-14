@@ -1,4 +1,5 @@
 """Explicit serial local worker: run again after shutdown to resume queued jobs."""
+from idp.security import INTERNAL
 import argparse
 from idp.storage.repository import DocumentRepository
 from idp.batch.service import BatchService
@@ -10,9 +11,9 @@ if __name__ == '__main__':
     parser.add_argument('--batch')
     parser.add_argument('--max-items',type=int,default=50)
     args = parser.parse_args()
-    service = BatchService(DocumentRepository(args.database))
+    service = BatchService(DocumentRepository(args.database, _capability=INTERNAL))
     try:
-        count = service.run(lambda:AgenticDocumentPipeline(args.database),args.batch,max_items=max(1,min(args.max_items,50)))
+        count = service.run(lambda:AgenticDocumentPipeline(args.database, _capability=INTERNAL),args.batch,max_items=max(1,min(args.max_items,50)))
         print(f'Finished {count} queued items. Re-run this command to continue remaining work.')
     except RuntimeError:
         print('Another worker is already running. No work was taken over.')

@@ -12,12 +12,14 @@ class PolicyService:
         self.repository=repository
 
     def active(self):
-        with self.repository.connect() as db:
+        self.repository.require('account')
+        with self.repository._connect() as db:
             row=dict(db.execute('SELECT * FROM policy_active WHERE singleton=1').fetchone())
         return {**self.version(row['version_id']),'generation':row['generation']}
 
     def version(self,version_id):
-        with self.repository.connect() as db:
+        self.repository.require('account')
+        with self.repository._connect() as db:
             row=db.execute('SELECT * FROM policy_versions WHERE id=?',(version_id,)).fetchone()
         if not row:
             raise ValueError('Policy version is unavailable. Processing must remain in review.')
@@ -34,12 +36,17 @@ class PolicyService:
         return result
 
     def draft(self,config,*,actor,reason):
+        actor=self.repository.access.actor(actor,'policy')
         from idp.review.service import ReviewService
         ReviewService.identity(actor,reason)
         validated=validate_config(config)
-        with self.repository.connect() as db:
-            return db.execute('INSERT INTO policy_versions(config,actor,reason,created_at) VALUES(?,?,?,?)',
+        with self.repository._connect() as db:
+            version = db.execute('INSERT INTO policy_versions(config,actor,reason,created_at) VALUES(?,?,?,?)',
                 (json.dumps(validated,sort_keys=True),actor.strip(),reason.strip(),self.repository.timestamp())).lastrowid
+            self.repository.access.attribution(db,'policy_versions',version)
+            from idp.security.auth import AuthService
+            if not self.repository.internal: AuthService(self.repository).event('policy_draft','allowed',str(version),self.repository.access.principal()['id'],db)
+            return version
 
     @staticmethod
     def fingerprint(db):
@@ -48,9 +55,10 @@ class PolicyService:
         return hashlib.sha256(json.dumps(records,ensure_ascii=False).encode()).hexdigest()
 
     def preview(self,version_id,document_ids=None):
+        self.repository.require('policy')
         from idp.review.service import ReviewService
         self.version(version_id)
-        with self.repository.connect() as db:
+        with self.repository._connect() as db:
             db.execute('BEGIN IMMEDIATE')
             active=dict(db.execute('SELECT * FROM policy_active').fetchone())
             fingerprint=self.fingerprint(db)
@@ -77,12 +85,13 @@ class PolicyService:
         return {'id':preview_id,'version_id':version_id,'generation':active['generation'],'complete':complete,'documents':results}
 
     def activate(self,version_id,preview_id,*,actor,reason,confirmed=False):
+        actor=self.repository.access.actor(actor,'policy')
         from idp.review.service import ReviewService, ReviewConflict
         ReviewService.identity(actor,reason)
         if confirmed is not True:
             raise ValueError('Explicit activation confirmation is required.')
         self.version(version_id)
-        with self.repository.connect() as db:
+        with self.repository._connect() as db:
             db.execute('BEGIN IMMEDIATE')
             active=dict(db.execute('SELECT * FROM policy_active').fetchone())
             preview=db.execute('SELECT * FROM policy_previews WHERE id=?',(preview_id,)).fetchone()
@@ -90,22 +99,28 @@ class PolicyService:
                 raise ReviewConflict('Policy preview is missing or stale. Preview all current documents again before activation.')
             generation=active['generation']+1
             db.execute('UPDATE policy_active SET version_id=?,generation=? WHERE singleton=1',(version_id,generation))
-            db.execute('INSERT INTO policy_activations(version_id,previous_version_id,preview_id,actor,reason,created_at,generation) VALUES(?,?,?,?,?,?,?)',
+            event=db.execute('INSERT INTO policy_activations(version_id,previous_version_id,preview_id,actor,reason,created_at,generation) VALUES(?,?,?,?,?,?,?)',
                 (version_id,active['version_id'],preview_id,actor.strip(),reason.strip(),self.repository.timestamp(),generation))
+            self.repository.access.attribution(db,'policy_activations',event.lastrowid)
+            from idp.security.auth import AuthService
+            if not self.repository.internal: AuthService(self.repository).event('policy_activation','allowed',str(version_id),self.repository.access.principal()['id'],db)
         return generation
 
     def history(self):
-        with self.repository.connect() as db:
+        self.repository.require('policy')
+        with self.repository._connect() as db:
             return [dict(row) for row in db.execute('SELECT * FROM policy_activations ORDER BY id DESC')]
 
     def versions(self):
-        with self.repository.connect() as db:
+        self.repository.require('policy')
+        with self.repository._connect() as db:
             return [dict(row) for row in db.execute('''SELECT v.id,v.actor,v.reason,v.created_at,
                 CASE WHEN v.id=(SELECT version_id FROM policy_active) THEN 'Active'
                   WHEN EXISTS(SELECT 1 FROM policy_activations a WHERE a.version_id=v.id) THEN 'Historical'
                   ELSE 'Draft' END AS status FROM policy_versions v ORDER BY v.id DESC''')]
 
     def evaluate(self,state):
+        self.repository.require('process')
         started=perf_counter()
         result=copy.deepcopy(state)
         try:
@@ -143,7 +158,7 @@ class PolicyService:
             party={'invoice':'seller','purchase_order':'vendor','receipt':'seller','contract':'party_a'}.get(kind)
             norm=lambda value:' '.join(str(value or '').casefold().split())
             if identifier and fields.get(identifier):
-                with self.repository.connect() as db:
+                with self.repository._connect() as db:
                     for row in db.execute('SELECT id,extracted_data FROM documents WHERE document_type=?',(kind,)):
                         other=json.loads(row['extracted_data'])
                         if row['id']!=result.get('document_id') and norm(other.get(identifier))==norm(fields[identifier]) and norm(other.get(party))==norm(fields.get(party)):
@@ -169,12 +184,13 @@ class PolicyService:
         return result
 
     def reevaluate(self,document_id,expected_revision,version_id,*,actor,reason,confirmed=False):
+        actor=self.repository.access.actor(actor,'policy',document_id)
         from idp.review.service import ReviewService
         ReviewService.identity(actor,reason)
         if confirmed is not True:
             raise ValueError('Explicit reevaluation confirmation is required.')
         service=ReviewService(self.repository)
-        with self.repository.connect() as db:
+        with self.repository._connect() as db:
             db.execute('BEGIN IMMEDIATE')
             document=service._current(db,document_id,expected_revision)
             active=db.execute('SELECT version_id FROM policy_active').fetchone()[0]

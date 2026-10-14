@@ -70,9 +70,10 @@ class BatchService:
             self.root.chmod(0o700)
 
     def submit(self, files, *, request_key, name='Document batch', description='', force=False):
+        self.repository.require('batches')
         if not request_key or len(request_key) > 128:
             raise ValueError('A valid submission identifier is required.')
-        with self.repository.connect() as db:
+        with self.repository._connect() as db:
             prior = db.execute('SELECT id FROM batch_jobs WHERE request_key=?',(request_key,)).fetchone()
         if prior:
             return prior['id']
@@ -93,7 +94,7 @@ class BatchService:
             if os.name != 'nt':
                 path.chmod(0o600)
             paths.append((info, path))
-        with self.repository.connect() as db:
+        with self.repository._connect() as db:
             db.execute('BEGIN IMMEDIATE')
             prior = db.execute('SELECT id FROM batch_jobs WHERE request_key=?',(request_key,)).fetchone()
             if prior:
@@ -109,31 +110,45 @@ class BatchService:
         return batch_id
 
     def history(self):
-        with self.repository.connect() as db:
+        self.repository.require('batches')
+        with self.repository._connect() as db:
             return [dict(row) for row in db.execute('''SELECT b.*,count(i.id) AS items,
                 sum(i.state='queued') AS queued,sum(i.state='processing') AS processing,
                 sum(i.state='failed') AS failed FROM batch_jobs b JOIN batch_items i ON i.batch_id=b.id
                 GROUP BY b.id ORDER BY b.created_at DESC''')]
 
     def items(self, batch_id):
-        with self.repository.connect() as db:
+        self.repository.require('batches')
+        with self.repository._connect() as db:
             return [dict(row) for row in db.execute('SELECT * FROM batch_items WHERE batch_id=? ORDER BY id',(batch_id,))]
 
     def source(self, item):
+        if not self.repository.internal:
+            self.repository.require('source')
+            with self.repository._connect() as db:
+                stored=db.execute('SELECT * FROM batch_items WHERE id=?',(item['id'],)).fetchone()
+            if not stored: raise FileNotFoundError('Retained source unavailable')
+            item=dict(stored)  # Never trust a supplied path/document/hash.
+            if item['document_id']: self.repository.access.document(item['document_id'],'source')
+            else: self.repository.require('batches')
         original = Path(item['source_path'])
         path = original.resolve()
         if path.parent != self.root or original.is_symlink() or not path.is_file():
             raise FileNotFoundError('Retained source unavailable')
         if path.stat().st_size > 20 * 1024 * 1024:
             raise ValueError('Retained source exceeds size limit')
+        if self.repository.calculate_hash(path)!=item['file_hash']:
+            raise ValueError('Retained source hash verification failed')
         return path
 
     def attempts(self, item_id):
-        with self.repository.connect() as db:
+        self.repository.require('batches')
+        with self.repository._connect() as db:
             return [dict(row) for row in db.execute('SELECT * FROM batch_attempts WHERE item_id=? ORDER BY id',(item_id,))]
 
     def retry(self, item_id):
-        with worker_lock(self.repository.db_path), self.repository.connect() as db:
+        self.repository.require('batches')
+        with worker_lock(self.repository.db_path), self.repository._connect() as db:
             row = db.execute('SELECT * FROM batch_items WHERE id=?',(item_id,)).fetchone()
             if not row or row['state'] != 'failed':
                 raise ValueError('Only failed items can be retried.')
@@ -143,16 +158,19 @@ class BatchService:
             db.execute("UPDATE batch_items SET state='queued',generation=generation+1,error_category=NULL,safe_error=NULL,completed_at=NULL WHERE id=?",(item_id,))
             db.execute('UPDATE batch_jobs SET reconciled_at=NULL WHERE id=?',(row['batch_id'],))
 
-    def run(self, pipeline_factory, batch_id=None, *, max_items=50, progress=None):
+    def run(self, pipeline_factory, batch_id=None, *, max_items=50, progress=None, ai_consent=False):
+        self.repository.require('batches')
+        if not self.repository.internal and ai_consent is not True:
+            raise ValueError('Explicit consent to external Groq batch processing is required.')
         count = 0
         with worker_lock(self.repository.db_path):
-            with self.repository.connect() as db:
+            with self.repository._connect() as db:
                 # A free OS lock proves previous worker is gone; retain interrupted attempt.
                 db.execute("UPDATE batch_attempts SET state='interrupted',completed_at=? WHERE state='processing'",(self.repository.timestamp(),))
                 db.execute("UPDATE batch_items SET state='queued' WHERE state='processing'")
             pipeline = None
             while count < max_items:
-                with self.repository.connect() as db:
+                with self.repository._connect() as db:
                     db.execute('BEGIN IMMEDIATE')
                     row = db.execute("SELECT * FROM batch_items WHERE state='queued'" + (' AND batch_id=?' if batch_id else '') + ' ORDER BY id LIMIT 1', (batch_id,) if batch_id else ()).fetchone()
                     if not row:
@@ -172,7 +190,7 @@ class BatchService:
                         raise ValueError('Source changed')
                     if pipeline is None:
                         pipeline = pipeline_factory()
-                    result = pipeline.process(path, original_filename=item['filename'],force_reprocess=bool(item['force_reprocess']),operation_key=f"batch:{item['id']}:{item['generation']}")
+                    result = pipeline.process(path, original_filename=item['filename'],force_reprocess=bool(item['force_reprocess']),operation_key=f"batch:{item['id']}:{item['generation']}",ai_consent=True)
                     state = result['state']
                     outcome = 'duplicate' if result['duplicate'] else 'review_required' if state.get('workflow_status') != 'pending_department_review' else 'completed'
                     category = message = None
@@ -181,7 +199,7 @@ class BatchService:
                     category, message = safe_failure(error)
                     result = None
                 duration = time.perf_counter() - tick
-                with self.repository.connect() as db:
+                with self.repository._connect() as db:
                     completed = self.repository.timestamp()
                     db.execute('''UPDATE batch_items SET state=?,completed_at=?,document_id=?,run_id=?,error_category=?,safe_error=?,duration_seconds=?,result_snapshot=? WHERE id=?''',
                         (outcome,completed,result['document_id'] if result else None,result['run_id'] if result else None,category,message,duration,json.dumps(result['state']) if result else None,item['id']))
@@ -196,10 +214,11 @@ class BatchService:
 
     def reconcile(self, batch_id):
         """Deterministic post-batch PO recheck: no OCR/model call, no new run."""
+        self.repository.require('batches')
         items = self.items(batch_id)
         if any(item['state'] not in TERMINAL for item in items):
             return
-        with self.repository.connect() as db:
+        with self.repository._connect() as db:
             job = db.execute('SELECT reconciled_at FROM batch_jobs WHERE id=?',(batch_id,)).fetchone()
         if not job or job['reconciled_at']:
             return
@@ -243,7 +262,7 @@ class BatchService:
                 continue
             encoded = json.dumps(state)
             # Do not reset review decisions or repeat processing-run side effects.
-            with self.repository.connect() as db:
+            with self.repository._connect() as db:
                 changed = db.execute('UPDATE documents SET full_result=?,workflow_status=?,assigned_department=?,updated_at=? WHERE id=? AND full_result=?',
                     (encoded,state['workflow_status'],state['assigned_department'],self.repository.timestamp(),document['id'],json.dumps(document['full_result'],ensure_ascii=False)))
                 if not changed.rowcount:
@@ -256,7 +275,7 @@ class BatchService:
                 db.execute('''UPDATE batch_items SET result_snapshot=?,state=CASE WHEN state='duplicate' THEN state ELSE ? END
                     WHERE batch_id=? AND document_id=? AND state!='failed' ''',
                     (encoded,'completed' if state['workflow_status']=='pending_department_review' else 'review_required',batch_id,document['id']))
-        with self.repository.connect() as db:
+        with self.repository._connect() as db:
             db.execute('UPDATE batch_jobs SET reconciled_at=? WHERE id=?',(self.repository.timestamp(),batch_id))
 
     def summary(self, batch_id):

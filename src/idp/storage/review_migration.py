@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 def migrate_review(repository):
-    with repository.connect() as db:
+    with repository._connect() as db:
         if db.execute("SELECT 1 FROM sqlite_master WHERE name='review_events'").fetchone():
             return
         if db.execute('SELECT count(*) FROM documents').fetchone()[0]:
