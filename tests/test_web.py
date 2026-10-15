@@ -193,3 +193,102 @@ class WebTests(PipelineFixture):
         grant=self.client.post('/api/downloads',json={'kind':'source','resource':{'item_id':item['id']}}).json()['grant']
         service.source(item).write_bytes(b'changed')
         self.assertEqual(self.client.post('/api/downloads/'+grant).status_code,400)
+
+    def test_unconfigured_database_has_no_browser_bootstrap_or_default_account(self):
+        from idp.storage.repository import DocumentRepository
+        from idp.security import INTERNAL
+        empty = self.root / 'unconfigured.db'
+        client = TestClient(create_app(empty), headers={'x-idp-request': '1'})
+        response = client.post('/api/login', json={'username': 'admin', 'password': self.password})
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(client.get('/api/users').status_code, 401)
+        self.assertIn(client.post('/api/bootstrap', json={}).status_code, (404, 405))
+        repo = DocumentRepository(empty, _capability=INTERNAL)
+        with repo.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM users').fetchone()[0], 0)
+
+    def test_login_permissions_and_logout_revoke_saved_cookie(self):
+        response = self.client.post('/api/login', json={'username': 'web-finance', 'password': 'wrong-input'})
+        self.assertEqual(response.status_code, 401)
+        self.login('web-finance')
+        permissions = self.client.get('/api/session').json()['permissions']
+        self.assertIn('review', permissions)
+        self.assertNotIn('users', permissions)
+        self.assertNotIn('process', permissions)
+        cookie = self.client.cookies.get('idp_session')
+        self.assertEqual(self.client.post('/api/logout').status_code, 200)
+        self.assertEqual(self.client.get('/api/session').status_code, 401)
+        replay = TestClient(self.app, headers={'x-idp-request': '1'})
+        replay.cookies.set('idp_session', cookie)
+        self.assertEqual(replay.get('/api/session').status_code, 401)
+
+    def test_auditor_reads_history_but_cannot_mutate_or_export(self):
+        payload = {'expected_revision': self.repo.get_document(self.invoice)['revision'],
+                   'reason': 'Auditable decision', 'confirmed': True, 'decision': 'rejected'}
+        self.assertEqual(self.client.post(f'/api/documents/{self.invoice}/decision', json=payload).status_code, 200)
+        AuthService(self.repo).create_user('web-auditor', self.password, 'Auditor', ['Finance'])
+        self.login('web-auditor')
+        detail = self.client.get(f'/api/documents/{self.invoice}')
+        self.assertEqual(detail.status_code, 200, detail.text)
+        self.assertTrue(detail.json()['events'])
+        self.assertEqual(self.client.post(f'/api/documents/{self.invoice}/decision', json=payload).status_code, 403)
+        self.assertEqual(self.client.post('/api/downloads', json={'kind': 'document_json',
+                         'resource': {'document_id': self.invoice}}).status_code, 403)
+        self.assertEqual(self.client.get(f'/api/documents/{self.contract}').status_code, 403)
+
+    def test_read_destinations_and_details_do_not_initialize_model(self):
+        with patch('idp.pipeline.agentic_pipeline.AgenticDocumentPipeline', side_effect=AssertionError('Unexpected model initialization')):
+            for route in ('/api/overview', '/api/documents', '/api/review', '/api/analytics',
+                          '/api/policies', '/api/users', '/api/audit', '/api/retention'):
+                response = self.client.get(route)
+                self.assertEqual(response.status_code, 200, (route, response.text))
+            detail = self.client.get(f'/api/documents/{self.invoice}').json()
+        self.assertEqual(detail['sources'], [])
+        self.assertEqual(detail['full_result']['extracted_fields']['invoice_number'], 'INV-WEB')
+        self.assertIn('field_evidence', detail['full_result'])
+        self.assertIn('validation_passed', detail['full_result'])
+        self.assertIn('workflow_status', detail['full_result'])
+        self.assertIn('routing_reason', detail['full_result'])
+
+    def test_review_notes_are_document_scoped_and_actor_cannot_be_spoofed(self):
+        original = self.repo.get_document(self.contract)
+        payload = {'expected_revision': self.repo.get_document(self.invoice)['revision'],
+                   'reason': 'Invoice only', 'confirmed': True, 'decision': 'rejected', 'notes': 'Invoice-specific notes'}
+        forged = self.client.post(f'/api/documents/{self.invoice}/decision', json={**payload, 'actor': 'another-user'})
+        self.assertEqual(forged.status_code, 422)
+        response = self.client.post(f'/api/documents/{self.invoice}/decision', json=payload)
+        self.assertEqual(response.status_code, 200, response.text)
+        for _ in range(2):
+            invoice = self.client.get(f'/api/documents/{self.invoice}').json()
+            contract = self.client.get(f'/api/documents/{self.contract}').json()
+            self.assertEqual(invoice['review_notes'], 'Invoice-specific notes')
+            self.assertEqual(contract['review_notes'], original['review_notes'])
+            self.assertEqual(contract['revision'], original['revision'])
+
+    def test_batch_failed_item_http_retry_after_app_restart(self):
+        from idp.pipeline.agentic_pipeline import AgenticDocumentPipeline
+        self.llm.kind = 'receipt'
+        self.llm.fields = {'seller': 'Shop', 'issue_date': '2026-10-01', 'total': 'INR 20.00'}
+        def factory(repo):
+            return AgenticDocumentPipeline(repo.db_path, baseline=self.baseline, llm=self.llm, session_token=repo.session_token)
+        self.client = TestClient(create_app(self.repo.db_path, pipeline_factory=factory), headers={'x-idp-request': '1'})
+        self.login()
+        stream = io.BytesIO()
+        pdf = canvas.Canvas(stream); pdf.drawString(50, 750, 'Synthetic receipt'); pdf.save()
+        response = self.client.post('/api/uploads/batch', files=[('files', ('receipt.pdf', stream.getvalue(), 'application/pdf'))],
+                                    data={'consent': 'true', 'request_key': 'retry-http'})
+        self.assertEqual(response.status_code, 200, response.text)
+        job = response.json()['batch_id']
+        with patch.object(self.baseline, 'process', side_effect=RuntimeError('Synthetic processing failure')):
+            self.assertEqual(self.client.post(f'/api/batches/{job}/run', json={'consent': True}).status_code, 200)
+        self.client = TestClient(create_app(self.repo.db_path, pipeline_factory=factory), headers={'x-idp-request': '1'})
+        self.login()
+        summary = self.client.get(f'/api/batches/{job}').json()
+        self.assertEqual(summary['counts']['failed'], 1)
+        item = summary['items'][0]['id']
+        self.assertEqual(self.client.post(f'/api/batch-items/{item}/retry').status_code, 200)
+        self.assertEqual(self.client.get(f'/api/batches/{job}').json()['counts']['queued'], 1)
+        self.assertEqual(self.client.post(f'/api/batches/{job}/run', json={'consent': True}).status_code, 200)
+        summary = self.client.get(f'/api/batches/{job}').json()
+        self.assertEqual(summary['counts']['failed'], 0)
+        self.assertEqual(summary['counts']['completed'], 1)

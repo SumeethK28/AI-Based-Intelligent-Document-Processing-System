@@ -1,12 +1,9 @@
 """Versioned policy regression tests. Provider responses are simulated."""
 from idp.security import INTERNAL
 import copy
-import json
 import sqlite3
 from contextlib import closing
 from datetime import date
-from pathlib import Path
-from unittest.mock import patch
 
 from _test_support import PipelineFixture
 from idp.policy.schema import DEFAULT, validate_config
@@ -191,30 +188,6 @@ class PolicyTests(PipelineFixture):
         self.assertIn('contract_expiration',contract['state']['policy_failed_rules'])
         wrong=self.process('arithmetic.txt','receipt',{'seller':'Shop','issue_date':'2026-10-01','total':'INR 10.01','subtotal':'INR 9.00','tax':'INR 1.00','payment_method':'Cash'})
         self.assertIn('arithmetic',wrong['state']['policy_failed_rules'])
-
-    def test_policy_ui_draft_preview_activation_and_explanations(self):
-        from streamlit.testing.v1 import AppTest
-        self.invoice()
-        with patch('idp.ui.console.get_repository',return_value=self.repo), patch.dict('os.environ',{'IDP_DATABASE_PATH':str(self.repo.db_path)}):
-            app=AppTest.from_file(str(Path(__file__).resolve().parents[2]/'app/app.py'),default_timeout=30).run()
-            app.radio(key='navigation').set_value('Administration').run()
-            app.radio(key='administration_view').set_value('Business Rules').run()
-            app.text_input(key='policy_actor').set_value('prototype:admin')
-            app.text_area(key='policy_reason').set_value('Require invoice PO references')
-            app.text_area(key='policy_edit_0_require_po_reference').set_value('true')
-            app.button(key='policy_save').click().run()
-            app.selectbox(key='policy_selected').set_value(2).run()
-            app.button(key='policy_preview').click().run()
-            next(value for value in app.checkbox if value.label=='I confirm activation for future processing after inspecting the preview.').check().run()
-            app.button(key='policy_activate').click().run()
-            self.assertEqual(self.policy.active()['id'],2)
-            self.assertFalse(next(value for value in app.checkbox if value.label=='I confirm activation for future processing after inspecting the preview.').value)
-            self.assertFalse(app.exception)
-            app.radio(key='navigation').set_value('Documents').run()
-            app.radio(key='documents_view').set_value('Document Repository').run()
-            self.assertTrue(any('Decision explanations' in value.value for value in app.markdown))
-            app.radio(key='navigation').set_value('Insights').run()
-            self.assertFalse(app.exception)
 
 
 if __name__=='__main__':

@@ -2,7 +2,9 @@
 
 Audit: 11 October 2026. Baseline commit `0defb2f`; working tree clean at start.
 Scope of this increment: Milestone 1 assessment and Milestone 2 dashboard/navigation.
-Preserve Python 3.14.6, uv, RapidOCR, Groq, LangGraph, SQLite and Streamlit.
+Current stack: React/TypeScript, FastAPI, Python 3.14.6, uv, RapidOCR, Groq,
+LangGraph and SQLite. The assessment below records the original milestone scope;
+see [architecture](architecture.md) for the current runtime and startup instructions.
 
 ## Evidence and research limits
 

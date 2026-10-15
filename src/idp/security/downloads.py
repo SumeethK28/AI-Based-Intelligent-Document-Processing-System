@@ -1,4 +1,4 @@
-"""Authenticated single-use download delivery; no public Streamlit file/media storage."""
+"""Authenticated single-use download delivery; no public file/media storage."""
 import json
 import secrets
 import threading

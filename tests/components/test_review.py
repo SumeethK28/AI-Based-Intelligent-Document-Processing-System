@@ -223,22 +223,13 @@ class ReviewTests(unittest.TestCase):
         with self.assertRaises(UnsafeApproval):
             self.decide(invoice)
 
-    def test_missing_retained_original_and_reload_history(self):
-        import streamlit as st
-        from streamlit.testing.v1 import AppTest
-        st.cache_resource.clear()
-        self.addCleanup(st.cache_resource.clear)
-        id=self.create()
-        self.service.manage(id,self.revision(id),'claim',actor='alice',reason='Inspection')
-        with patch('idp.ui.console.get_repository',return_value=self.repo), patch.dict('os.environ',{'IDP_DATABASE_PATH':str(self.repo.db_path)}):
-            for _ in range(2):
-                app=AppTest.from_file(str(Path(__file__).resolve().parents[2]/'app/app.py'), default_timeout=30).run(timeout=30)
-                app.radio(key='navigation').set_value('My Work').run(timeout=30)
-                app.radio(key='work_view').set_value('Review Center').run(timeout=30)
-                self.assertEqual(len(app.exception),0)
-                self.assertTrue(any('No retained batch source' in item.value for item in app.caption))
-                self.assertEqual(app.selectbox(key='review_document_id').value,id)
-        self.assertEqual(self.service.history(id)[0]['actor'],'alice')
+    def test_reload_preserves_claim_history_without_retained_original(self):
+        id = self.create()
+        self.service.manage(id, self.revision(id), 'claim', actor='alice', reason='Inspection')
+        for _ in range(2):
+            reopened = ReviewService(DocumentRepository(self.repo.db_path, _capability=INTERNAL))
+            self.assertEqual(reopened.history(id)[0]['actor'], 'alice')
+            self.assertEqual(reopened.history(id)[0]['event_type'], 'claim')
 
 
 if __name__=='__main__':
