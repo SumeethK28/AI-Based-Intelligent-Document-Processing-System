@@ -96,6 +96,7 @@ desktop.ini
 # ==========================================
 
 /results/
+/research_sources/
 
 
 # ==========================================
@@ -131,3 +132,8 @@ desktop.ini
 *.tmp
 *.worker.lock
 **/batch_sources/
+
+# React build/cache files; package manifests and lockfile remain tracked.
+node_modules/
+/frontend/dist/
+*.tsbuildinfo

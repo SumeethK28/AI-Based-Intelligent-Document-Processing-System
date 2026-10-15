@@ -348,7 +348,7 @@ class SecurityTests(PipelineFixture):
         from streamlit.testing.v1 import AppTest
         empty=self.root/'unconfigured.db'
         with patch.dict('os.environ',{'IDP_DATABASE_PATH':str(empty)}):
-            app=AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app/app.py'),default_timeout=30).run()
+            app=AppTest.from_file(str(Path(__file__).resolve().parents[2]/'app/app.py'),default_timeout=30).run()
             self.assertTrue(any('First-time setup' in element.value for element in app.info))
             self.assertTrue(any('scripts/manage_security.py bootstrap' in element.value for element in app.code))
             self.assertEqual(len(app.text_input),0)
@@ -360,7 +360,7 @@ class SecurityTests(PipelineFixture):
     def test_real_login_ui_role_navigation_and_logout(self):
         from streamlit.testing.v1 import AppTest
         with patch.dict('os.environ',{'IDP_DATABASE_PATH':str(self.repo.db_path)}):
-            app=AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app/app.py'),default_timeout=30).run()
+            app=AppTest.from_file(str(Path(__file__).resolve().parents[2]/'app/app.py'),default_timeout=30).run()
             self.assertEqual(len(app.radio),0)
             app.text_input(key='login_username').set_value('finance-test')
             app.text_input(key='login_password').set_value('wrong-input')
@@ -384,7 +384,7 @@ class SecurityTests(PipelineFixture):
         document=self.repo.get_document(self.invoice)
         ReviewService(self.finance).decide(self.invoice,document['revision'],'approved',actor=None,reason='Auditable authenticated decision')
         with patch.dict('os.environ',{'IDP_DATABASE_PATH':str(self.repo.db_path)}):
-            app=AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app/app.py'),default_timeout=30).run()
+            app=AppTest.from_file(str(Path(__file__).resolve().parents[2]/'app/app.py'),default_timeout=30).run()
             app.text_input(key='login_username').set_value('auditor-test')
             app.text_input(key='login_password').set_value(PASSWORD)
             next(button for button in app.button if button.label=='Sign in').click().run()

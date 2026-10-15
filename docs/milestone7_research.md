@@ -7,7 +7,7 @@ They do not write to the original database or send the supplied research reports
 ## Prepare synthetic ground truth before predictions
 
 ```
-uv run --python 3.14.6 python scripts/prepare_research_pilot.py --output results/research_pilot_new/dataset
+uv run --python 3.14.6 python research/tools/prepare_research_pilot.py --output results/research_pilot_new/dataset
 ```
 
 The generator produces six fictional single-page PDFs with source hashes, expected
@@ -19,13 +19,13 @@ development pilot cases, not an untouched independent industrial test set.
 Default runs existing deterministic extraction with real RapidOCR, without model calls:
 
 ```
-uv run --python 3.14.6 python scripts/research_ablation.py --manifest results/research_pilot_new/dataset/manifest.json --output results/research_pilot_new/baseline
+uv run --python 3.14.6 python research/tools/research_ablation.py --manifest results/research_pilot_new/dataset/manifest.json --output results/research_pilot_new/baseline
 ```
 
 Opt-in live mode sends only the declared synthetic OCR to the configured Groq model:
 
 ```
-uv run --python 3.14.6 python scripts/research_ablation.py --manifest results/research_pilot_new/dataset/manifest.json --output results/research_pilot_new/live --live
+uv run --python 3.14.6 python research/tools/research_ablation.py --manifest results/research_pilot_new/dataset/manifest.json --output results/research_pilot_new/live --live
 ```
 
 A is the existing deterministic baseline. B is raw parsed live Groq output before
@@ -46,9 +46,9 @@ saved; keys, headers and exception bodies are not.
 ## Stress and batch work
 
 ```
-uv run --python 3.14.6 python scripts/prepare_research_stress.py --manifest results/research_pilot_new/dataset/manifest.json --output results/research_pilot_new/stress_dataset
-uv run --python 3.14.6 python scripts/research_ablation.py --manifest results/research_pilot_new/stress_dataset/manifest.json --output results/research_pilot_new/stress_A
-uv run --python 3.14.6 python scripts/research_batch_replay.py --predictions results/research_pilot_new/live/predictions.json --manifest results/research_pilot_new/dataset/manifest.json --output results/research_pilot_new/batches
+uv run --python 3.14.6 python research/tools/prepare_research_stress.py --manifest results/research_pilot_new/dataset/manifest.json --output results/research_pilot_new/stress_dataset
+uv run --python 3.14.6 python research/tools/research_ablation.py --manifest results/research_pilot_new/stress_dataset/manifest.json --output results/research_pilot_new/stress_A
+uv run --python 3.14.6 python research/tools/research_batch_replay.py --predictions results/research_pilot_new/live/predictions.json --manifest results/research_pilot_new/dataset/manifest.json --output results/research_pilot_new/batches
 ```
 
 Stress variants cover 90-degree rotation, low resolution, seeded noise, two-column tax
@@ -64,7 +64,7 @@ failures even when a command exits successfully.
 
 ## Historical reanalysis and plots
 
-`scripts/research_metrics.py` reanalyses saved reports using role-sensitive present-slot
+`research/tools/research_metrics.py` reanalyses saved reports using role-sensitive present-slot
 comparisons. Incorrect values count as FP and FN; omitted values as FN. Unannotated
 extras are not labelled hallucinations. The evidence text-support flag is a proxy,
 not independent role/evidence adjudication. Wilson intervals are descriptive iid
@@ -75,7 +75,7 @@ live results, historical reanalysis, deterministic tests and recorded-response t
 The summary can be reproduced with a new output directory:
 
 ```
-uv run --python 3.14.6 --with matplotlib python scripts/summarize_research.py --root results/milestone7_20261014 --output results/research_summary_new --plots
+uv run --python 3.14.6 --with matplotlib python research/tools/summarize_research.py --root results/milestone7_20261014 --output results/research_summary_new --plots
 ```
 
 Matplotlib is temporary for plotting; it is not added to product dependencies.

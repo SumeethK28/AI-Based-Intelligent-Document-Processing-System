@@ -101,7 +101,7 @@ def main():
         'live_usage':live,'stage_latency':latency,'repeat_cases':repeat_rows,'stress_A':stress_rows,
         'limitations':'Synthetic development pilot, correlated source templates/families, two repeated sources only. No measured industrial productivity, broad real-world accuracy, independent evidence annotation, API retry attribution, or scalable live inference throughput. No layout fallback benefit observed because none was used.'}
     (args.output/'summary.json').write_text(json.dumps(summary,indent=2),encoding='utf-8')
-    fingerprints={str(path):hashlib.sha256(path.read_bytes()).hexdigest() for path in [Path('uv.lock'),*Path('src/idp').rglob('*.py'),*Path('scripts').glob('*research*.py')]}
+    fingerprints={str(path):hashlib.sha256(path.read_bytes()).hexdigest() for path in [Path('uv.lock'),*Path('src/idp').rglob('*.py'),*Path('research/tools').glob('*.py')]}
     (args.output/'code_fingerprints.json').write_text(json.dumps(fingerprints,indent=2),encoding='utf-8')
     # Blank human-study sheet: no fabricated measurements.
     with (args.output/'human_study_template.csv').open('w',encoding='utf-8') as stream:
