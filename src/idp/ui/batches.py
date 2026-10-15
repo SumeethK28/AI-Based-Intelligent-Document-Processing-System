@@ -78,7 +78,9 @@ def bulk_page(repository, pipeline_factory, record_table):
     record_table(summary['items'])
     st.caption(f"Measured latest-attempt processing time: {summary['measured_processing_seconds']:.2f} seconds. No throughput estimate is implied.")
     with st.expander('Batch outcomes and financial totals',expanded=True):
-        st.json(summary['distributions'])
+        record_table([{'outcome':key,'count':value} for key,value in summary['distributions'].items() if not isinstance(value,(dict,list))])
+        with st.expander('Technical outcome record'):
+            st.json(summary['distributions'])
         record_table(summary['financial_totals'])
         st.caption('Unique invoice values by currency and safety category. Duplicate uploads are counted once. These are extracted values, not paid balances.')
     if repository.internal:

@@ -8,3 +8,7 @@ maxMessageSize = 100
 
 [browser]
 gatherUsageStats = false
+
+[theme]
+primaryColor = "#2563eb"
+font = "sans-serif"

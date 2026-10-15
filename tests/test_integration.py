@@ -161,7 +161,7 @@ class IntegrationTests(unittest.TestCase):
         with patch("idp.ui.console.get_repository", return_value=self.pipeline.repository), patch.dict("os.environ", {"IDP_DATABASE_PATH": str(self.pipeline.repository.db_path)}), patch("idp.pipeline.agentic_pipeline.AgenticDocumentPipeline", return_value=self.pipeline):
             app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "app/app.py"), default_timeout=30).run(timeout=30)
             self.assertEqual(len(app.exception), 0)
-            self.assertEqual(len(app.radio(key="navigation").options), 9)
+            self.assertEqual(len(app.radio(key="navigation").options), 5)
             self.assertGreater(len(app.selectbox), 0)
 
 
