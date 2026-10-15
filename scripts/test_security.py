@@ -109,6 +109,21 @@ class SecurityTests(PipelineFixture):
         with self.assertRaises(AccessDenied): OperationsQueries(manager).export()
         with self.assertRaises(AccessDenied): self.users['auditor-test'][2].require('export')
 
+    def test_review_queue_excludes_related_read_only_documents(self):
+        po=self.process('queue-po.txt','purchase_order',{'po_number':'PO-QUEUE','order_date':'2026-10-01','vendor':'Supplier','total':'INR 100.00'})['document_id']
+        invoice=self.process('queue-invoice.txt','invoice',{'invoice_number':'INV-QUEUE','issue_date':'2026-10-01','seller':'Supplier','client':'Buyer','total':'INR 100.00','po_reference':'PO-QUEUE'})['document_id']
+        self.assertEqual(self.finance.get_document(po)['id'],po)
+        finance_queue,_=ReviewService(self.finance).queue()
+        self.assertIn(invoice,[row['id'] for row in finance_queue])
+        self.assertNotIn(po,[row['id'] for row in finance_queue])
+        procurement=self.users['procurement-test'][2]
+        self.assertEqual(procurement.get_document(invoice)['id'],invoice)
+        procurement_queue,_=ReviewService(procurement).queue()
+        self.assertIn(po,[row['id'] for row in procurement_queue])
+        self.assertNotIn(invoice,[row['id'] for row in procurement_queue])
+        with self.assertRaises(AccessDenied):
+            ReviewService(self.finance).decide(po,self.repo.get_document(po)['revision'],'approved',actor=None,reason='Read-only related PO')
+
     def test_unauthorized_review_correction_approval_and_forged_actor(self):
         document=self.repo.get_document(self.invoice)
         with self.assertRaises(AccessDenied): ReviewService(self.legal).preview_correction(self.invoice,{'total':'INR 100.00'}, {})
@@ -237,6 +252,21 @@ class SecurityTests(PipelineFixture):
         self.assertEqual(error.exception.code,403)
         error.exception.close()
 
+    def test_unicode_source_filename_download_has_safe_attachment_header(self):
+        import urllib.request
+        from urllib.parse import quote
+        item=self.source_item(self.invoice)
+        filename='invoice_测试.pdf'
+        with self.repo.connect() as db:
+            db.execute('UPDATE batch_items SET filename=? WHERE id=?',(filename,item['id']))
+        server=start_download_server(self.repo.db_path,port=0)
+        self.addCleanup(server.server_close);self.addCleanup(server.shutdown)
+        token=DownloadService(self.finance).grant('source',{'item_id':item['id']})
+        with urllib.request.urlopen(f'http://127.0.0.1:{server.server_port}/download?grant={token}') as response:
+            self.assertEqual(response.status,200)
+            self.assertIn("filename*=UTF-8''"+quote(filename,safe=''),response.headers['Content-Disposition'])
+            self.assertTrue(response.read().startswith(b'%PDF-'))
+
     def test_concurrent_authenticated_decisions_and_high_value_guard(self):
         from concurrent.futures import ThreadPoolExecutor
         document=self.repo.get_document(self.invoice)
@@ -313,6 +343,19 @@ class SecurityTests(PipelineFixture):
             for table,records in before.items(): self.assertEqual([tuple(row) for row in db.execute('SELECT * FROM '+table)],records)
             self.assertFalse(db.execute('PRAGMA foreign_key_check').fetchall())
         self.assertEqual(len(list(self.root.glob('legacy.db.before_security_v1.*.db'))),1)
+
+    def test_first_time_ui_explains_local_bootstrap_without_browser_registration(self):
+        from streamlit.testing.v1 import AppTest
+        empty=self.root/'unconfigured.db'
+        with patch.dict('os.environ',{'IDP_DATABASE_PATH':str(empty)}):
+            app=AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app/app.py'),default_timeout=30).run()
+            self.assertTrue(any('First-time setup' in element.value for element in app.info))
+            self.assertTrue(any('scripts/manage_security.py bootstrap' in element.value for element in app.code))
+            self.assertEqual(len(app.text_input),0)
+            self.assertEqual(len(app.radio),0)
+            self.assertFalse(app.exception)
+        with closing(sqlite3.connect(empty)) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM users').fetchone()[0],0)
 
     def test_real_login_ui_role_navigation_and_logout(self):
         from streamlit.testing.v1 import AppTest

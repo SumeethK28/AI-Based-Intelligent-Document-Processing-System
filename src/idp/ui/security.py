@@ -31,7 +31,12 @@ def gate(repository):
     st.caption('Local research prototype · individual accounts · department access enforced on the server')
     with repository._connect() as db: configured=db.execute('SELECT count(*) FROM users').fetchone()[0]>0
     if not configured:
-        st.info('An administrator must initialize accounts using the local manage_security.py bootstrap command. No shared/default credentials or browser-first-user setup exists.')
+        st.info('First-time setup is required before the sign-in form is available. Create your administrator account in a terminal on this computer.')
+        st.write('Open a terminal in the project folder and run:')
+        st.code('uv run --python 3.14.6 python scripts/manage_security.py bootstrap',language='powershell')
+        st.caption('If the application uses a custom database, pass --database followed by that same database path before bootstrap.')
+        st.write('Choose your account name and a password of 12–128 characters at the prompts, then refresh this page to sign in. Keep your password private.')
+        st.caption('Setup preserves existing records and creates backups before migrations. There is no shared default password or browser administrator registration.')
         st.stop()
     with st.form('login_form',clear_on_submit=True):
         username=st.text_input('Account name',key='login_username',max_chars=64)

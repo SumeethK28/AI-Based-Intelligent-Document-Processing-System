@@ -118,6 +118,27 @@ class ValidationAgent:
         errors: list[str] = []
         warnings: list[str] = []
 
+        # The baseline certifies a seller block only for a unique explicit
+        # two-column layout. Text occurrence alone cannot establish field roles.
+        baseline = state.get('baseline_fields', {})
+        certificate = baseline.get('seller_tax_id_evidence') or ''
+        certificate_parts = [self.normalize_text(part) for part in certificate.splitlines() if part.strip()]
+        certified_seller = baseline.get('seller')
+        certified_tax_id = baseline.get('tax_id')
+        certified = (
+            document_type == state.get('baseline_document_type') == 'invoice'
+            and certified_seller and certified_tax_id and len(certificate_parts) == 3
+            and certificate_parts[0] == 'seller:'
+            and certificate_parts[1] == self.normalize_text(certified_seller)
+            and self.normalize_text(certified_tax_id) in certificate_parts[2]
+            and all(part in normalized_ocr for part in certificate_parts)
+        )
+        if certified:
+            if fields.get('seller') and self.normalize_text(fields['seller']) != self.normalize_text(certified_seller):
+                errors.append('Seller role conflicts with the layout-certified seller block.')
+            if fields.get('tax_id') and self.normalize_text(fields['tax_id']) != self.normalize_text(certified_tax_id):
+                errors.append('Seller tax ID conflicts with the layout-certified seller block.')
+
         # =============================================
         # STEP 1: DOCUMENT TYPE
         # =============================================

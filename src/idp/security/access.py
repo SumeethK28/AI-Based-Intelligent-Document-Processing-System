@@ -87,5 +87,5 @@ class AccessControl:
 
 def scoped_where(repository,where,args,permission='analytics'):
     repository.require(permission)
-    scope,extra=repository.access.scope()
+    scope,extra=repository.access.scope(mutation=permission=='review')
     return where+(' AND ' if where else ' WHERE ')+scope,[*args,*extra]

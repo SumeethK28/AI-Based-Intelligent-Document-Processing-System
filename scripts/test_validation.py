@@ -88,6 +88,39 @@ class ValidationTests(unittest.TestCase):
         self.assertTrue(any("Total mismatch" in error for error in result["validation_errors"]))
         self.assertTrue(any("Invalid date" in error for error in result["validation_errors"]))
 
+    def test_layout_certified_role_conflicts_require_review_without_overwriting(self):
+        import copy
+        from idp.agents.routing_agent import WorkflowRoutingAgent
+        fields={'invoice_number':'INV-ROLE','issue_date':'2026-10-14','seller':'Acme Ltd','client':'Buyer LLC','total':'INR 118.00','tax_id':'901-88-0463'}
+        text='\n'.join(fields.values())+'\nSeller:\nAcme Ltd\nTax Id: 909-83-7738'
+        state={'document_type':'invoice','baseline_document_type':'invoice','extracted_fields':fields,
+            'ocr_text':text,'field_evidence':dict(fields),'agent_history':[],
+            'baseline_fields':{'seller':'Acme Ltd','tax_id':'909-83-7738','total':'999.00',
+                'seller_tax_id_evidence':'Seller:\nAcme Ltd\nTax Id: 909-83-7738'}}
+        original=copy.deepcopy(fields)
+        result=ValidationAgent().run(state)
+        self.assertFalse(result['validation_passed'])
+        self.assertTrue(any('Seller tax ID conflicts' in error for error in result['validation_errors']))
+        self.assertEqual(WorkflowRoutingAgent().run({**state,**result,'risk_level':'low'})['workflow_status'],'manual_review')
+        self.assertEqual(fields,original)
+        fields['seller']='Buyer LLC'
+        self.assertTrue(any('Seller role conflicts' in error for error in ValidationAgent().run(state)['validation_errors']))
+
+    def test_layout_certificate_preserves_correct_or_missing_optional_tax_id(self):
+        fields={'invoice_number':'INV-ROLE','issue_date':'2026-10-14','seller':'Acme Ltd','client':'Buyer LLC','total':'INR 118.00','tax_id':'909-83-7738'}
+        state={'document_type':'invoice','baseline_document_type':'invoice','extracted_fields':fields,
+            'ocr_text':'\n'.join(fields.values())+'\nSeller:\nAcme Ltd\nTax Id: 909-83-7738',
+            'field_evidence':dict(fields),'baseline_fields':{'seller':'Acme Ltd','tax_id':'909-83-7738',
+                'seller_tax_id_evidence':'Seller:\nAcme Ltd\nTax Id: 909-83-7738'}}
+        self.assertTrue(ValidationAgent().run(state)['validation_passed'])
+        fields.pop('tax_id')
+        result=ValidationAgent().run(state)
+        self.assertTrue(result['validation_passed'])
+        self.assertIn('tax_id',result['missing_optional_fields'])
+        fields['tax_id']='901-88-0463';state['ocr_text']+='\n901-88-0463';state['field_evidence']['tax_id']='901-88-0463'
+        state['baseline_fields']['seller_tax_id_evidence']='Seller:\nAcme Ltd\nFabricated Tax Id: 909-83-7738'
+        self.assertTrue(ValidationAgent().run(state)['validation_passed'])
+
     def test_missing_fields_unknown_types_and_negative_amount(self):
         for kind in ("invoice", "receipt", "contract", "purchase_order", "unknown"):
             with self.subTest(kind=kind):

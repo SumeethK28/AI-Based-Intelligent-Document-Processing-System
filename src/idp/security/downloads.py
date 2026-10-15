@@ -5,7 +5,7 @@ import threading
 import time
 from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, quote
 
 from idp.security.auth import AuthService, AccessDenied, digest
 from idp.storage.repository import DocumentRepository
@@ -98,9 +98,11 @@ def start_download_server(database_path,port=8767):
                     service=DownloadService(DocumentRepository(database_path))
                     data,name,mime=service.redeem(token)
                     name=''.join(char for char in name if char.isalnum() or char in '._- ')[:120] or 'document'
+                    ascii_name=''.join(char if ord(char)<128 else '_' for char in name)
+                    disposition=f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{quote(name,safe="")}'
                     self.send_response(200)
                     self.send_header('Content-Type',mime)
-                    self.send_header('Content-Disposition',f'attachment; filename="{name}"')
+                    self.send_header('Content-Disposition',disposition)
                     self.send_header('Cache-Control','no-store')
                     self.send_header('Referrer-Policy','no-referrer')
                     self.send_header('X-Content-Type-Options','nosniff')
