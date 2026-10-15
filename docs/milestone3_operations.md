@@ -1,5 +1,9 @@
 # Persistent batch processing
 
+The operator workflow below describes the React application. Migration details
+record the original batch milestone. Authentication and authorization added later
+are described in [the security guide](milestone6_security.md).
+
 Milestone 3 preserves the existing RapidOCR → hybrid LangGraph → SQLite workflow.
 It adds bounded ingestion, persistent jobs/items/attempts, run idempotency keys and
 snapshots, retained sources and derived repository search indexes. ZIP support is
@@ -20,20 +24,23 @@ the backup and source storage. No dependencies or enterprise security system add
 
 ## Operator workflow
 
-Open Bulk Processing, choose authorized mixed files and inspect accepted/rejected
-rows. Confirm retention and Groq processing explicitly, then submit. Repeated
+Open Documents > Upload, choose one or many authorized files and inspect the
+accepted/rejected preview rows. Confirm retention and Groq processing explicitly,
+then submit; processing starts automatically. Repeated
 requests with the same submission token return the same batch. Only accepted files
-are saved. Use Start / resume batch or run the explicit worker from the project:
+are saved. Monitor saved state in Processing jobs. For explicit operator-controlled
+processing, run the worker from the project:
 
 ```
 uv run --python 3.14.6 python scripts/batch_worker.py --database data/idp.db
 ```
 
 Optionally add `--batch BATCH_ID` and `--max-items 50`. The worker is initially serial,
-bounded to 50 items per command. Run again for remaining work. The UI button runs
-inside the Streamlit process: it is not an independent background service. Browser
-refresh reads saved progress; application/worker shutdown requires restarting this
-command. An OS file lock prevents simultaneous workers for the same database;
+bounded to 50 items per command. Run again for remaining work. Browser-triggered
+processing runs in the FastAPI server; it is not an independent worker service.
+Browser refresh reads saved progress. Following application/worker shutdown, resume
+from Processing jobs or restart the worker command. An OS file lock prevents
+simultaneous workers for the same database;
 SQLite transactions protect each claim/update. Restart closes an interrupted attempt
 and requeues its item. A unique operation key recovers a committed run after a crash
 between document persistence and item completion without another API call or run.
@@ -74,8 +81,8 @@ Limits: 50 files, 20 MB each, 100 MB total, 10 pages/PDF, 100 pages/batch, 16 mi
 pixels per decoded image/rendered PDF page, 40 million rendered pixels/PDF. Damaged,
 encrypted, repaired PDFs, animated images and extension/signature mismatches are
 rejected before OCR. File-level rejection is displayed in preview; rejected files
-are not batch items. Streamlit may buffer uploads before validation, so this is not
-a hardened public upload gateway.
+are not batch items. The HTTP adapter applies request-size and same-origin checks;
+this local prototype is not a hardened public upload gateway.
 
 ## Results and repository
 

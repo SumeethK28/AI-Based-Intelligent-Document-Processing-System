@@ -1,4 +1,8 @@
-# Milestone 6 security assessment and implementation plan
+# Authentication, authorization and data security
+
+Current delivery uses React and the same-origin FastAPI adapter. The assessment
+below retains the original security milestone scope; current transport details
+are documented alongside its preserved service controls.
 
 ## Assessment before database changes
 
@@ -28,8 +32,8 @@ Priority plan, before any schema change:
    each mutation and linked resource. Label legacy actors without inventing identities.
 3. Protect exports/source delivery on an authenticated localhost HTTP endpoint with
    short-lived, one-use grants bound to valid sessions and fresh resource authorization.
-   Streamlit's ordinary media/download URLs do not enforce these checks; disable them
-   for protected data. Do not expose source files or sensitive previews as public media.
+   Never expose protected data through public static or media URLs. Use authenticated
+   delivery for source files, exports and sensitive previews.
 4. Add a login/account experience, role-aware navigation and guided policy controls.
    Remove shared user-scoped caches and clear all session data on logout/identity changes.
 5. Strengthen source hash checks, explicit AI consent, bounded inputs and injection
@@ -50,8 +54,10 @@ independent security review. SQLite append-only triggers are not cryptographic p
 
 Password hashing follows the maintained argon2-cffi PasswordHasher defaults (Argon2id):
 https://argon2-cffi.readthedocs.io/en/stable/api.html.
-Streamlit sessions are tied to their WebSocket connection; refresh may require login:
-https://docs.streamlit.io/develop/api-reference/caching-and-state/st.session_state.
+The React application uses an HttpOnly, SameSite=strict session cookie and
+server-side session validation. Refresh retains valid authentication; expiry, logout
+or account changes require a new login. The local HTTP prototype does not set the
+cookie Secure flag; public deployment requires TLS and an appropriate cookie policy.
 No public deployment or compliance claim is part of this increment.
 
 ## Implemented identity and session controls
@@ -75,9 +81,9 @@ Opaque 256-bit random sessions are stored only as SHA-256 hashes. Tokens are not
 client-supplied role claims or predictable IDs. Each protected request rechecks current
 account activation, role, scope, revocation, absolute expiration (one hour) and idle timeout
 (15 minutes). Account changes/password changes revoke all existing sessions. Logout
-revokes its session and clears all Streamlit state. Reloading may require login because
-the token is held server-side in the current WebSocket session, never a persistent browser
-cookie/localStorage. Already received browser data/downloads cannot be revoked remotely.
+revokes its session, clears the session cookie and returns the React interface to
+sign-in. Browser refresh revalidates the cookie against the server. The token is not
+stored in localStorage. Already received browser data/downloads cannot be revoked remotely.
 
 Failed login counters are persisted for normalized account-name hashes and a global
 local-server bucket. Five failures per account or thirty global failures during fifteen
@@ -129,8 +135,8 @@ routing checks remain deterministic; the policy engine itself is privileged comp
 
 ## Downloads, storage, external AI and retention
 
-Protected data never uses production Streamlit download_button/media storage. A localhost
-HTTP server issues 30-second, single-use random grants bound to hashed auth sessions.
+The FastAPI adapter issues 30-second, single-use random download grants bound to
+hashed auth sessions and the requesting browser session.
 Redemption checks expiration/replay, live session/account, current role and document scope,
 then generates the current export or reads a server-stored source. Caller-supplied paths,
 hashes and document links are ignored: source metadata is fetched by item ID. Resolved
@@ -141,15 +147,17 @@ An administrator and authorized reviewers can export only their current document
 manager JSON contains summary-only authorized aggregates; auditors have no sensitive
 exports. Downloaded files already legitimately received remain outside server revocation.
 
-The endpoint is loopback HTTP on port 8767; there is no publicly accessible deployment.
-Grant URLs are short-lived bearer material: do not share them; artifacts redact them.
-The auxiliary server is intentionally small, not a hardened multi-instance proxy. A
-deployment must replace loopback delivery with TLS, robust session transport, hardened
-download handling and abuse limits. Windows account permissions/BitLocker or equivalent
-must protect SQLite, backups and retained files; application RBAC does not encrypt them.
+The React application and protected download endpoints share loopback HTTP on port
+8000 by default (`IDP_WEB_PORT` selects another port). The download service's auxiliary
+local HTTP adapter remains available to existing service tests and compatibility
+clients; it is not required to run the React application. Grant material must never
+be shared or logged. Public deployment requires TLS, hardened transport and abuse
+limits. Windows account permissions/BitLocker or equivalent must protect SQLite,
+backups and retained files; application RBAC does not encrypt them.
 
-Existing signature/byte/page/pixel/archive limits are retained. Streamlit uploads are
-bounded to 20 MB, loopback binding and XSRF/CORS protections remain enabled. Intake is
+Existing signature/byte/page/pixel/archive limits are retained. Files are bounded
+to 20 MB each, 50 files and 100 MB total per submission. FastAPI checks bounded
+request lengths and same-origin mutations; invalid files fail before OCR. Intake is
 administrator-only: classification cannot be used to turn a departmental upload into a
 cross-department discovery channel. Single/batch service entrypoints require explicit
 external Groq consent; local CLI workers are privileged operator commands. Classification

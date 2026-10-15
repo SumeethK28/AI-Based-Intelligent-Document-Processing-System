@@ -3,11 +3,9 @@ import copy
 import io
 import json
 import sqlite3
-import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
-from unittest.mock import patch
 
 from _test_support import PipelineFixture
 from idp.security import INTERNAL
@@ -343,59 +341,6 @@ class SecurityTests(PipelineFixture):
             for table,records in before.items(): self.assertEqual([tuple(row) for row in db.execute('SELECT * FROM '+table)],records)
             self.assertFalse(db.execute('PRAGMA foreign_key_check').fetchall())
         self.assertEqual(len(list(self.root.glob('legacy.db.before_security_v1.*.db'))),1)
-
-    def test_first_time_ui_explains_local_bootstrap_without_browser_registration(self):
-        from streamlit.testing.v1 import AppTest
-        empty=self.root/'unconfigured.db'
-        with patch.dict('os.environ',{'IDP_DATABASE_PATH':str(empty)}):
-            app=AppTest.from_file(str(Path(__file__).resolve().parents[2]/'app/app.py'),default_timeout=30).run()
-            self.assertTrue(any('First-time setup' in element.value for element in app.info))
-            self.assertTrue(any('scripts/manage_security.py bootstrap' in element.value for element in app.code))
-            self.assertEqual(len(app.text_input),0)
-            self.assertEqual(len(app.radio),0)
-            self.assertFalse(app.exception)
-        with closing(sqlite3.connect(empty)) as db:
-            self.assertEqual(db.execute('SELECT count(*) FROM users').fetchone()[0],0)
-
-    def test_real_login_ui_role_navigation_and_logout(self):
-        from streamlit.testing.v1 import AppTest
-        with patch.dict('os.environ',{'IDP_DATABASE_PATH':str(self.repo.db_path)}):
-            app=AppTest.from_file(str(Path(__file__).resolve().parents[2]/'app/app.py'),default_timeout=30).run()
-            self.assertEqual(len(app.radio),0)
-            app.text_input(key='login_username').set_value('finance-test')
-            app.text_input(key='login_password').set_value('wrong-input')
-            next(button for button in app.button if button.label=='Sign in').click().run()
-            self.assertTrue(app.error)
-            app.text_input(key='login_username').set_value('finance-test')
-            app.text_input(key='login_password').set_value(PASSWORD)
-            next(button for button in app.button if button.label=='Sign in').click().run()
-            self.assertNotIn('Administration',app.radio(key='navigation').options)
-            self.assertNotIn('Accounts',app.radio(key='navigation').options)
-            app.radio(key='navigation').set_value('Documents').run()
-            app.radio(key='documents_view').set_value('Document Repository').run()
-            self.assertEqual(list(app.selectbox(key='repository_document_id').options),[f'{self.invoice} · invoice.txt'])
-            self.assertFalse(app.exception)
-            app.button(key='logout').click().run()
-            self.assertEqual(len(app.radio),0)
-            self.assertNotIn('repository_document_id',app.session_state)
-
-    def test_auditor_ui_reads_authorized_history_without_mutation(self):
-        from streamlit.testing.v1 import AppTest
-        document=self.repo.get_document(self.invoice)
-        ReviewService(self.finance).decide(self.invoice,document['revision'],'approved',actor=None,reason='Auditable authenticated decision')
-        with patch.dict('os.environ',{'IDP_DATABASE_PATH':str(self.repo.db_path)}):
-            app=AppTest.from_file(str(Path(__file__).resolve().parents[2]/'app/app.py'),default_timeout=30).run()
-            app.text_input(key='login_username').set_value('auditor-test')
-            app.text_input(key='login_password').set_value(PASSWORD)
-            next(button for button in app.button if button.label=='Sign in').click().run()
-            self.assertNotIn('My Work',app.radio(key='navigation').options)
-            app.radio(key='navigation').set_value('Documents').run()
-            app.radio(key='documents_view').set_value('Document Repository').run()
-            self.assertTrue(any(element.label=='Review and policy audit history (read-only)' for element in app.expander))
-            self.assertEqual(app.selectbox(key=f'repository_audit_{self.invoice}').options,['1'])
-            self.assertFalse(any(button.label=='Save Review Decision' for button in app.button))
-            self.assertFalse(any(button.label=='Download filtered JSON' for button in app.button))
-            self.assertFalse(app.exception)
 
 
 if __name__=='__main__': unittest.main()

@@ -141,25 +141,19 @@ with worker_lock(repo.db_path):
         self.assertEqual(len(self.repo.list_processing_runs()),1)
         self.assertEqual(reopened.attempts(item['id'])[0]['state'],'interrupted')
 
-    def test_bulk_ui_persisted_failure_retry_and_completion(self):
-        import streamlit as st
-        from streamlit.testing.v1 import AppTest
-        st.cache_resource.clear()
-        self.addCleanup(st.cache_resource.clear)
+    def test_persisted_failure_retry_and_completion_after_reopen(self):
         self.failure_markers.add('receipt')
         job = self.submit('receipt')
         self.run_job(job)
-        with patch('idp.ui.console.get_repository',return_value=self.repo), patch.dict('os.environ',{'IDP_DATABASE_PATH':str(self.repo.db_path)}),patch('idp.ui.console.get_pipeline',return_value=self.pipeline):
-            app = AppTest.from_file(str(Path(__file__).resolve().parents[2]/'app/app.py'), default_timeout=30).run(timeout=30)
-            app.radio(key='navigation').set_value('Documents').run()
-            app.radio(key='documents_view').set_value('Bulk Processing').run()
-            self.assertEqual(app.metric[3].value,'1')
-            next(button for button in app.button if button.label=='Retry failed item').click().run()
-            self.assertEqual(self.service.items(job)[0]['state'],'queued')
-            self.failure_markers.clear()
-            next(button for button in app.button if button.label=='Start / resume batch').click().run(timeout=30)
-            self.assertEqual(self.service.items(job)[0]['state'],'completed')
-            self.assertEqual(len(app.exception),0)
+        reopened = BatchService(DocumentRepository(self.repo.db_path, _capability=INTERNAL))
+        self.assertEqual(reopened.summary(job)['counts']['failed'], 1)
+        item = reopened.items(job)[0]
+        reopened.retry(item['id'])
+        self.assertEqual(reopened.items(job)[0]['state'], 'queued')
+        self.failure_markers.clear()
+        reopened.run(lambda: self.pipeline, job)
+        self.assertEqual(reopened.items(job)[0]['state'], 'completed')
+        self.assertEqual([row['state'] for row in reopened.attempts(item['id'])], ['failed', 'completed'])
 
     def test_reconciliation_preserves_independent_high_anomaly(self):
         job = self.submit('invoice','po')

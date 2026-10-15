@@ -25,9 +25,9 @@ env/
 .env.*
 !.env.example
 
-# Streamlit credentials (keep the shared server configuration tracked)
-.streamlit/secrets.toml
-.streamlit/secrets.*.toml
+# Private local credential configuration
+**/secrets.toml
+**/secrets.*.toml
 
 
 # ==========================================

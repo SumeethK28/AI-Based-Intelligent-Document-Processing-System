@@ -45,7 +45,7 @@ def inspect_file(filename, data, limits=Limits()):
         signature = data.startswith(b'\x89PNG\r\n\x1a\n') if extension == '.png' else data.startswith(b'\xff\xd8\xff')
         if not signature:
             raise ValueError('Image signature does not match the file extension.')
-        # Header dimensions before allocating a decoded image (Pillow is a Streamlit dependency).
+        # Check header dimensions with Pillow before allocating a decoded image.
         from PIL import Image
         import io
         try:
