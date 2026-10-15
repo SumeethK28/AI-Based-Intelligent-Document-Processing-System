@@ -150,7 +150,7 @@ with worker_lock(repo.db_path):
         job = self.submit('receipt')
         self.run_job(job)
         with patch('idp.ui.console.get_repository',return_value=self.repo), patch.dict('os.environ',{'IDP_DATABASE_PATH':str(self.repo.db_path)}),patch('idp.ui.console.get_pipeline',return_value=self.pipeline):
-            app = AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app/app.py'), default_timeout=30).run(timeout=30)
+            app = AppTest.from_file(str(Path(__file__).resolve().parents[2]/'app/app.py'), default_timeout=30).run(timeout=30)
             app.radio(key='navigation').set_value('Documents').run()
             app.radio(key='documents_view').set_value('Bulk Processing').run()
             self.assertEqual(app.metric[3].value,'1')

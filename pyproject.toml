@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.14"
 dependencies = [
     "argon2-cffi>=25.1.0",
+    "fastapi>=0.143.2",
     "groq>=1.7.0",
     "langgraph>=1.2.14",
     "onnxruntime>=1.30.0",
@@ -16,9 +17,11 @@ dependencies = [
     "pydantic>=2.14.0",
     "pymupdf>=1.28.2",
     "python-dotenv>=1.2.4",
+    "python-multipart>=0.0.32",
     "rapidocr>=3.9.2",
     "reportlab>=5.0.1",
     "streamlit>=1.64.0",
+    "uvicorn>=0.53.0",
 ]
 
 [build-system]
@@ -27,3 +30,8 @@ build-backend = "uv_build"
 
 [tool.uv.build-backend]
 module-name = "idp"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+]

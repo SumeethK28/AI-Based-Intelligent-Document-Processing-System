@@ -196,7 +196,7 @@ class PolicyTests(PipelineFixture):
         from streamlit.testing.v1 import AppTest
         self.invoice()
         with patch('idp.ui.console.get_repository',return_value=self.repo), patch.dict('os.environ',{'IDP_DATABASE_PATH':str(self.repo.db_path)}):
-            app=AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app/app.py'),default_timeout=30).run()
+            app=AppTest.from_file(str(Path(__file__).resolve().parents[2]/'app/app.py'),default_timeout=30).run()
             app.radio(key='navigation').set_value('Administration').run()
             app.radio(key='administration_view').set_value('Business Rules').run()
             app.text_input(key='policy_actor').set_value('prototype:admin')

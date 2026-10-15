@@ -124,7 +124,7 @@ Use Python 3.14.6 and uv:
 ```
 uv run --python 3.14.6 python scripts/run_tests.py
 uv run --python 3.14.6 python -m unittest discover -s tests -v
-uv run --python 3.14.6 python scripts/evaluate_policies.py
+uv run --python 3.14.6 python research/tools/evaluate_policies.py
 ```
 
 The evaluator creates a new results directory and isolated UAT database, 14 labeled

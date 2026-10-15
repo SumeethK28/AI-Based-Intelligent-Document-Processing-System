@@ -18,7 +18,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--output',default=None)
     args = parser.parse_args()
-    root = Path(__file__).resolve().parents[1]
+    root = Path(__file__).resolve().parents[2]
     output = Path(args.output) if args.output else root/'results'/('milestone3_'+datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S'))
     output.mkdir(parents=True,exist_ok=False)
     database = output/'live.db'
