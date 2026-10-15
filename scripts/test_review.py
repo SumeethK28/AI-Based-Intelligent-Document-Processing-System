@@ -233,7 +233,8 @@ class ReviewTests(unittest.TestCase):
         with patch('idp.ui.console.get_repository',return_value=self.repo), patch.dict('os.environ',{'IDP_DATABASE_PATH':str(self.repo.db_path)}):
             for _ in range(2):
                 app=AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app/app.py'), default_timeout=30).run(timeout=30)
-                app.radio(key='navigation').set_value('Review Center').run(timeout=30)
+                app.radio(key='navigation').set_value('My Work').run(timeout=30)
+                app.radio(key='work_view').set_value('Review Center').run(timeout=30)
                 self.assertEqual(len(app.exception),0)
                 self.assertTrue(any('No retained batch source' in item.value for item in app.caption))
                 self.assertEqual(app.selectbox(key='review_document_id').value,id)

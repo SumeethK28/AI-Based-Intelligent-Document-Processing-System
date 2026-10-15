@@ -5,42 +5,41 @@ import os
 from dotenv import load_dotenv
 import tempfile
 from dataclasses import replace
-from datetime import date
 from pathlib import Path
 
 import streamlit as st
 
-from idp.storage.operations import DocumentFilters, OperationsQueries
+from idp.storage.operations import OperationsQueries
+from idp.ui.presentation import CSS, friendly, filters_ui, record_table, issues, status_summary, extracted_information
 from idp.storage.repository import DocumentRepository
-from idp.utils.exports import spreadsheet_safe
 
-PAGES = ("Overview", "Process Documents", "Bulk Processing", "Document Repository", "Review Center", "Department Workspaces",
-         "Business Analytics", "Business Rules", "Audit & Settings")
-DESCRIPTIONS = {
-    "Bulk Processing": "Submit, resume and investigate persistent mixed-document batches.",
-    "Overview": "Your operation at a glance. See what needs attention and where work is waiting.",
-    "Process Documents": "Extract, verify and route an invoice, purchase order, receipt or contract.",
-    "Document Repository": "Find stored information, source evidence and processing history.",
-    "Review Center": "Resolve documents awaiting a recorded review decision, with their evidence in view.",
-    "Department Workspaces": "Explore routed work by team. Department selection is a filter, not an access restriction.",
-    "Business Analytics": "Understand volumes and invoice values using actual stored records.",
-    "Business Rules": "Configure, preview and activate versioned document policies with protected safety checks.",
-    "Audit & Settings": "Understand data handling and the limits of this local prototype.",
+DESTINATIONS = {
+    'Overview': ('Overview',),
+    'Documents': ('Document Repository', 'Process Documents', 'Bulk Processing'),
+    'My Work': ('Review Center', 'Department Workspaces'),
+    'Insights': ('Business Analytics',),
+    'Administration': ('Business Rules', 'Accounts', 'Audit & Settings'),
 }
-CSS = """<style>
-.stMainBlockContainer {max-width:1440px; padding-top:2.3rem; padding-bottom:3rem;}
-[data-testid="stSidebar"] {border-right:1px solid color-mix(in srgb,currentColor 12%,transparent);}
-[data-testid="stMetric"] {background:rgba(128,128,128,.08); padding:1.15rem 1.3rem;
- border-radius:12px; border:1px solid color-mix(in srgb,currentColor 10%,transparent);}
-[data-testid="stMetricValue"] {font-size:clamp(1.45rem,2.5vw,2.1rem); font-weight:650;}
-h1 {letter-spacing:-.035em;} h2,h3 {letter-spacing:-.02em;}
-[data-testid="stExpander"] {border-radius:10px;}
-@media(max-width:760px) {.stMainBlockContainer {padding-top:1.2rem;} [data-testid="stMetric"] {padding:.85rem;}}
-</style>"""
+VIEW_KEYS = {'Documents': 'documents_view', 'My Work': 'work_view', 'Administration': 'administration_view'}
+VIEW_LABELS = {'Document Repository': 'Repository', 'Process Documents': 'Upload',
+               'Bulk Processing': 'Batches', 'Review Center': 'Review queue',
+               'Department Workspaces': 'Department work', 'Business Rules': 'Policies',
+               'Accounts': 'People', 'Audit & Settings': 'Audit & settings'}
+DESCRIPTIONS = {
+    'Overview': 'Your operation at a glance. See pending work, exceptions and recent activity.',
+    'Documents': 'Upload, find and inspect documents. Track batches without losing progress.',
+    'My Work': 'Inspect evidence, resolve exceptions and record a guarded review decision.',
+    'Insights': 'Understand document volumes, invoice values and processing performance.',
+    'Administration': 'Manage authorized access, versioned rules and data governance.',
+}
 
 
-def friendly(value):
-    return str(value or "Unavailable").replace("_", " ").title()
+def available_views(repository):
+    from idp.ui.security import allowed, PAGE_PERMISSION
+    return {destination: [view for view in views
+            if allowed(repository, PAGE_PERMISSION[view])
+            and (view != 'Audit & Settings' or allowed(repository, 'security_audit'))]
+            for destination, views in DESTINATIONS.items()}
 
 
 def get_repository(database_path):
@@ -54,58 +53,10 @@ def get_pipeline(database_path):
 
 
 def navigate(page):
-    st.session_state["navigation"] = page
-
-
-def filters_ui(queries, prefix, *, search=False):
-    options = queries.options()
-    with st.expander("Filter records", expanded=search):
-        a, b, c = st.columns(3)
-        kind = a.selectbox("Document type", [""] + options["document_type"], format_func=lambda v: friendly(v) if v else "All types", key=prefix + "_type")
-        department = b.selectbox("Department", [""] + options["department"], format_func=lambda v: v or "All departments", key=prefix + "_department")
-        status = c.selectbox("Workflow status", [""] + options["status"], format_func=lambda v: friendly(v) if v else "All statuses", key=prefix + "_status")
-        use_dates = st.checkbox("Filter by document received date (UTC)", key=prefix + "_dates")
-        a, b = st.columns(2)
-        start = a.date_input("Received from", value=date.today().replace(day=1), disabled=not use_dates, key=prefix + "_start")
-        end = b.date_input("Received through", value=date.today(), disabled=not use_dates, key=prefix + "_end")
-        if use_dates and start > end:
-            st.warning("Choose a start date on or before the end date.")
-            st.stop()
-        decision = st.selectbox("Review decision", [""] + options["review_decision"], format_func=lambda v: friendly(v) if v else "All decisions", key=prefix + "_decision")
-        query = st.text_input("Search filename, document number or business party", key=prefix + "_search") if search else ""
-        currency = ""
-        minimum = maximum = None
-        batch_id = ""
-        if search:
-            from idp.batch.service import BatchService
-            a,b,c = st.columns(3)
-            currency = a.text_input('Currency code',key=prefix+'_currency',max_chars=3).strip().upper()
-            use_amount = st.checkbox('Filter by extracted amount',key=prefix+'_money')
-            if use_amount:
-                st.caption('Amounts are nominal extracted values. Choose a currency to avoid comparing different units.')
-            minimum = b.number_input('Minimum amount',value=0.0,disabled=not use_amount,key=prefix+'_min') if use_amount else None
-            maximum = c.number_input('Maximum amount',value=1000000.0,disabled=not use_amount,key=prefix+'_max') if use_amount else None
-            if minimum is not None and minimum > maximum:
-                st.warning('Minimum amount must not exceed maximum amount.')
-                st.stop()
-            from idp.ui.security import allowed
-            jobs = BatchService(queries.repository).history() if allowed(queries.repository,'batches') else []
-            names = {job['id']:job['name'] for job in jobs}
-            batch_id = st.selectbox('Batch membership',['']+list(names),format_func=lambda key:names.get(key,'All batches'),key=prefix+'_batch')
-    return DocumentFilters(kind, department, status, decision, start if use_dates else None, end if use_dates else None, query,currency,minimum,maximum,batch_id)
-
-
-def record_table(rows):
-    if rows:
-        st.dataframe([{friendly(k): spreadsheet_safe(friendly(v) if k in {"document_type", "workflow_status", "review_decision", "cross_document_status"} else v)
-                       for k, v in row.items()} for row in rows], hide_index=True, width="stretch")
-
-
-def issues(values):
-    for item in values:
-        st.warning('Verification needs attention.')
-        # Document-derived descriptions must not load Markdown images or links.
-        st.text(item.get("description", str(item)) if isinstance(item, dict) else str(item))
+    destination = next((name for name, views in DESTINATIONS.items() if page in views), page)
+    st.session_state['navigation'] = destination
+    if destination in VIEW_KEYS:
+        st.session_state[VIEW_KEYS[destination]] = page
 
 
 def document_detail(repository, document, prefix, *, run_id="latest", duplicate=False):
@@ -115,9 +66,7 @@ def document_detail(repository, document, prefix, *, run_id="latest", duplicate=
     st.caption(f"Document {document['id']} · {friendly(state.get('document_type'))} · {state.get('assigned_department', 'Unassigned')}")
     if duplicate:
         st.info("Duplicate submission: saved results reused without a new AI request.")
-    for column, label, key in zip(st.columns(3), ("Workflow", "Verification", "Risk policy"), ("workflow_status", "cross_document_status", "risk_level")):
-        column.metric(label, friendly(state.get(key)))
-    st.write(state.get("routing_reason", "Routing reason unavailable."))
+    status_summary(state)
     from idp.ui.policies import explanations
     explanations(state)
     st.caption('Current human decision: ' + friendly(document.get('review_decision','pending')))
@@ -131,16 +80,25 @@ def document_detail(repository, document, prefix, *, run_id="latest", duplicate=
     st.markdown("#### Extracted information")
     st.caption("Formula-like text is escaped in table/CSV views. Original values are preserved in JSON.")
     if fields:
-        record_table([{"field": friendly(field), "value": value, "source": "Not extracted / omitted" if not value else "Human correction (authenticated account)" if state.get('field_provenance',{}).get(field,{}).get('actor_kind')=='authenticated_user' else "Human correction (historical prototype operator)" if state.get('field_provenance',{}).get(field,{}).get('source')=='human_correction' else "Verified OCR/layout fallback" if field in state.get("fallback_used", []) else "AI extraction"} for field, value in fields.items()])
+        extracted_information(fields)
     else:
         st.info("No structured fields were extracted.")
     with st.expander("Field Evidence"):
-        st.json(state.get("field_evidence", {}))
-        if state.get('field_provenance'):
-            st.json(state['field_provenance'])
-        if state.get("contract_parties"):
-            st.write("Named contracting parties:", state["contract_parties"])
-        issues(state.get("unsupported_contract_reasons", []))
+        evidence = state.get('field_evidence', {})
+        if not evidence:
+            st.info('No field evidence was recorded for this processing version.')
+        for field, quote in evidence.items():
+            st.text(friendly(field))
+            st.text(str(quote))
+            provenance = state.get('field_provenance', {}).get(field, {})
+            st.caption('Authenticated correction' if provenance.get('actor_kind') == 'authenticated_user'
+                       else 'Historical correction (unverified operator)' if provenance.get('source') == 'human_correction'
+                       else 'Verified OCR/layout recovery' if field in state.get('fallback_used', []) else 'Model extraction')
+        if state.get('contract_parties'):
+            st.text('Named parties: ' + ', '.join(state['contract_parties']))
+        issues(state.get('unsupported_contract_reasons', []))
+        with st.expander('Technical evidence record'):
+            st.json({'evidence': evidence, 'provenance': state.get('field_provenance', {})})
     if state.get("missing_optional_fields"):
         st.caption("Optional information unavailable: " + ", ".join(friendly(f) for f in state["missing_optional_fields"]))
     with st.expander("Purchase order comparison"):
@@ -150,10 +108,10 @@ def document_detail(repository, document, prefix, *, run_id="latest", duplicate=
             po = repository.get_document(state["matched_document_id"])
             if po:
                 st.write("Linked purchase order:", po["filename"])
-                st.json(po["extracted_data"])
+                extracted_information(po["extracted_data"])
                 def open_linked():
                     st.session_state['linked_document_id'] = po['id']
-                    st.session_state['navigation'] = 'Document Repository'
+                    navigate('Document Repository')
                 st.button('Open linked purchase order',key=f'{prefix}_linked_{document["id"]}',on_click=open_linked)
         if state.get("cross_document_status") == "not_checked":
             st.caption("No purchase order reference extracted; no PO comparison performed.")
@@ -218,7 +176,7 @@ def process_document(database_path, repository):
             st.image(upload, width=500)
     force = st.checkbox("Reprocess even if document already exists", key="force_reprocess", help="Runs OCR and AI again, updates the latest result and resets the review decision. Uses API quota.")
     consent=st.checkbox('I authorize sending this document OCR text to the configured external Groq service.',key='ai_consent')
-    if st.button("Process with AI Agents", type="primary", width="stretch",disabled=not consent):
+    if st.button("Extract and verify document", type="primary", width="stretch",disabled=not consent):
         st.session_state.pop("last_result", None)
         try:
             with st.spinner("Reading, checking and routing your document…"):
@@ -326,7 +284,7 @@ def browse(queries, repository, selection, prefix, *, review=False):
 
 def main():
     load_dotenv()
-    st.set_page_config(page_title="Document Operations | Enterprise IDP", page_icon="📄", layout="wide")
+    st.set_page_config(page_title="Document Operations | Enterprise IDP", layout="wide")
     st.markdown(CSS, unsafe_allow_html=True)  # Static CSS; never interpolate document content.
     database_path = os.getenv("IDP_DATABASE_PATH", "data/idp.db")
     repository = get_repository(database_path)
@@ -336,18 +294,28 @@ def main():
     with st.sidebar:
         st.markdown("## Document Operations")
         st.caption("Enterprise IDP · local prototype")
-        pages=[page for page in PAGES if allowed(repository,PAGE_PERMISSION[page])]
-        if not repository.internal and allowed(repository,'users'): pages.append('Accounts')
-        if st.session_state.get('navigation') not in pages: st.session_state.pop('navigation',None)
-        page = st.radio("Workspace", pages, key="navigation", label_visibility="collapsed")
-        repository.require(PAGE_PERMISSION[page])
+        views = {name: children for name, children in available_views(repository).items() if children}
+        pages = list(views)
+        if st.session_state.get('navigation') not in pages:
+            st.session_state.pop('navigation', None)
+        destination = st.radio('Workspace', pages, key='navigation', label_visibility='collapsed')
         account_controls(repository,principal)
         st.divider()
         st.caption("Evidence-grounded processing. No payment or legal execution.")
         st.caption('Authenticated local research prototype. Department scope is enforced in services; OS administrator access remains privileged.')
-    st.caption("DOCUMENT OPERATIONS / " + page.upper())
-    st.title(page)
-    st.caption(DESCRIPTIONS.get(page,'Manage individual accounts and explicit department scope.'))
+    st.caption('DOCUMENT OPERATIONS / ' + destination.upper())
+    st.title(destination)
+    st.caption(DESCRIPTIONS[destination])
+    children = views[destination]
+    if destination in VIEW_KEYS:
+        key = VIEW_KEYS[destination]
+        if st.session_state.get(key) not in children:
+            st.session_state.pop(key, None)
+        page = st.radio('Workspace view', children, format_func=lambda value: VIEW_LABELS[value],
+                        key=key, horizontal=True, label_visibility='collapsed')
+    else:
+        page = children[0]
+    repository.require(PAGE_PERMISSION[page])
     st.divider()
     if page == "Overview":
         overview(queries)
@@ -378,8 +346,6 @@ def main():
         st.write("OCR runs locally. Document text is sent to Groq. SQLite stores recognized text, fields and current decisions. Single uploads are temporary; batch sources are retained locally and eligible for explicit cleanup after 30 days.")
         st.write("Classification, extraction, validation, anomalies and purchase orders are checked before routing. Confidence values are reported scores, not calibrated accuracy.")
         st.info('Individual accounts and server-side department authorization are enforced. This prototype has no MFA, cryptographic audit protection, encrypted SQLite storage or compliance certification. OS administrators remain privileged.')
-        from idp.ui.security import password_form
-        password_form(repository)
         st.caption("Configured model: " + os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"))
         st.caption("Credentials are never displayed. Transient provider retries are bounded; invalid credentials are not repeatedly retried.")
         record_table(queries.overview()["activity"])

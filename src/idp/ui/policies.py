@@ -6,13 +6,14 @@ from idp.policy.schema import DESCRIPTION
 
 
 def workspace(repository):
-    from idp.ui.console import record_table
+    from idp.ui.presentation import record_table
     service=PolicyService(repository)
     repository.require('policy')
     active=service.active()
     st.info('Administrator access is enforced on the server. Policy changes never authorize payments or agreements. Historical prototype operator names remain unauthenticated.')
     st.caption(f"Active policy {active['id']} · activation generation {active['generation']}. Existing documents keep their recorded policy until explicit reevaluation.")
-    record_table([{'category':key,'value':json.dumps(value),'description':DESCRIPTION[key],'status':'Active','version':active['id']} for key,value in active['config'].items()])
+    with st.expander('Current rule definitions'):
+        record_table([{'category':key,'value':json.dumps(value),'description':DESCRIPTION[key],'status':'Active','version':active['id']} for key,value in active['config'].items()])
     st.info('Protected safety: OCR evidence, required base fields, supported contract structure, unique PO matching, supplier/currency consistency and non-low risk cannot be bypassed. PO tolerance is bounded to 1 nominal unit; arithmetic tolerance to 0.02.')
     actor=st.text_input('Prototype policy operator (unauthenticated)',key='policy_actor',max_chars=120) if repository.internal else repository.access.actor(None,'policy')
     reason=st.text_area('Policy change reason',key='policy_reason')
@@ -93,16 +94,25 @@ def guided_config(active):
 
 
 def explanations(state):
-    from idp.ui.console import record_table
+    from idp.ui.presentation import record_table
     st.markdown('#### Decision explanations')
     version=state.get('policy_version_id')
     st.caption(f'Policy version: {version}' if version is not None else 'Legacy baseline result: no historical policy version was recorded.')
     checks=state.get('rule_outcomes',[])
     if checks:
-        record_table(checks)
+        failures=[check for check in checks if check.get('escalates')]
+        if failures:
+            st.warning('These checks require a human review before normal processing:')
+            for check in failures:
+                st.text(check['description'])
+        else:
+            st.caption('The recorded business checks allow departmental review. A human decision may still be pending.')
+        with st.expander('All recorded checks and technical routing details'):
+            record_table(checks)
+            st.text(state.get('routing_reason','Routing explanation unavailable.'))
     else:
         st.caption('Individual policy outcomes were not captured for this legacy result. They will be recorded on new processing or explicit reevaluation.')
-    st.write(state.get('routing_reason','Routing explanation unavailable.'))
+        st.text(state.get('routing_reason','Routing explanation unavailable.'))
     if state.get('policy_evaluation_error'):
         st.error(state['policy_evaluation_error'])
 

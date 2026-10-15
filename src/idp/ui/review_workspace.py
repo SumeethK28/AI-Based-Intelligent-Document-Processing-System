@@ -11,7 +11,8 @@ from idp.agents.validation_agent import ValidationAgent
 
 
 def workspace(repository, *, department=False):
-    from idp.ui.console import filters_ui, record_table, document_detail, friendly
+    from idp.ui.presentation import filters_ui, record_table, friendly
+    from idp.ui.console import document_detail
     from idp.ui.batches import retained_details
     service = ReviewService(repository)
     repository.require('review')
@@ -70,7 +71,7 @@ def workspace(repository, *, department=False):
             row=next(row for row in versions if row['id']==version)
             st.caption(f"{row['origin']} · captured {row['captured_at']}. A legacy current snapshot does not reconstruct earlier history.")
             st.json(json.loads(row['original_state']))
-        with st.expander('Decision and case event history',expanded=True):
+        with st.expander('Decision and case event history'):
             events=service.history(selected)
             if not events:
                 st.info('No events have been recorded since review migration. Legacy decision history is unavailable.')
@@ -109,7 +110,10 @@ def workspace(repository, *, department=False):
             preview=st.session_state.get(stamp+'_preview_result')
             ready=bool(preview and preview['fingerprint']==fingerprint)
             if ready:
-                st.json(service.validation_summary(preview['result']['state']))
+                summary=service.validation_summary(preview['result']['state'])
+                st.success('Preview complete. Inspect the checks before saving.')
+                with st.expander('Preview check details',expanded=True):
+                    st.json(summary)
             confirmation=st.checkbox('I confirm these corrections and their recorded reason.',key=stamp+'_correct_confirm')
             if st.button('Save corrections',disabled=not ready or not confirmation,key=stamp+'_save_correction'):
                 mutate(lambda:service.apply_correction(selected,revision,changes,evidence,actor=operator,reason=correction_reason))

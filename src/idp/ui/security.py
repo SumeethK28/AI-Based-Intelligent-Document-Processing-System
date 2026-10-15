@@ -57,6 +57,8 @@ def account_controls(repository,principal):
     if repository.internal: return
     st.caption(f"Signed in as {principal['username']} · {principal['role']}")
     st.caption('Authorized departments: '+', '.join(principal['departments']))
+    with st.expander('My account'):
+        password_form(repository)
     if st.button('Sign out',key='logout'):
         try: AuthService(repository).logout(st.session_state['auth_token'])
         except AccessDenied: pass
@@ -64,7 +66,7 @@ def account_controls(repository,principal):
 
 
 def accounts(repository):
-    from idp.ui.console import record_table
+    from idp.ui.presentation import record_table
     repository.require('users')
     service=AuthService(repository)
     st.caption('Only active, individually assigned accounts can sign in. Account changes revoke all existing sessions. Never share temporary passwords; have the user change it immediately.')
@@ -79,6 +81,9 @@ def accounts(repository):
         except ValueError as error: st.error(str(error))
         else: st.success('Account created with a hashed password.')
     users=service.users(); record_table([{**row,'departments':row['departments']} for row in users])
+    if not users:
+        st.info('No accounts yet. Create an individual account using the form above.')
+        return
     by_id={row['id']:row for row in users}
     selected=st.selectbox('Manage account',list(by_id),format_func=lambda key:by_id[key]['username'],key='manage_account')
     user=by_id[selected]

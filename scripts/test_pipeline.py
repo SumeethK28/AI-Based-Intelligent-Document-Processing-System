@@ -1,29 +1,7 @@
 """Component regression tests; API responses are simulated unless explicitly noted."""
 from idp.security import INTERNAL
-import tempfile
 import unittest
-from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import patch
 
-from idp.llm.schemas import AIClassificationResult, AIExtractionResult
-from idp.pipeline.agentic_pipeline import AgenticDocumentPipeline
-from idp.agents.validation_agent import ValidationAgent
-from idp.agents.cross_document_agent import CrossDocumentAgent
-from idp.extraction.receipt_extractor import ReceiptExtractor
-
-
-class FakeLLM:
-    def __init__(self):
-        self.kind = "purchase_order"
-        self.fields = {}
-        self.calls = 0
-
-    def generate_structured(self, *, response_model, **kwargs):
-        self.calls += 1
-        if response_model is AIClassificationResult:
-            return response_model(document_type=self.kind, confidence=1)
-        return AIExtractionResult(**self.fields, confidence=1, field_evidence=self.fields)
 
 
 from _test_support import PipelineFixture
