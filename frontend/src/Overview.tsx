@@ -8,7 +8,7 @@ import {
   CircleAlert,
   ClipboardCheck,
 } from "lucide-react";
-import { RecordData } from "./api";
+import { RecordData, Session } from "./api";
 
 import {
   ActionContext,
@@ -16,13 +16,14 @@ import {
   useLoad,
   Button,
   Panel,
+  Detail,
   State,
   Table,
   Metric,
 } from "./components";
 import { Filters } from "./Documents";
 
-export function Overview({ navigate }: { navigate: (v: string) => void }) {
+export function Overview({ navigate, session }: { navigate: (v: string) => void; session: Session }) {
   const [filters, setFilters] = useState<RecordData>({});
   const { data, error, loading } = useLoad(
       "/overview?" + new URLSearchParams(filters),
@@ -48,13 +49,31 @@ export function Overview({ navigate }: { navigate: (v: string) => void }) {
             Know what is ready, what needs attention, and where work is waiting.
           </p>
         </div>
-        {allowed(permissions, "process") && (
+        {allowed(permissions, "intake") && (
           <Button primary onClick={() => navigate("Documents")}>
             <Upload size={17} />
             Open documents
           </Button>
         )}
       </div>
+      <Panel title={`Welcome, ${session.username}`}>
+        <p>{session.role} · {session.departments.join(", ")}</p>
+        {data.employee_work && <>
+          <div className="metrics secondary">
+            <Metric label="Assigned to me" value={data.employee_work.assigned_to_me} />
+            <Metric label="Unclaimed department cases" value={data.employee_work.unclaimed} />
+            <Metric label="Department awaiting action" value={data.employee_work.department_cases} />
+            <Metric label="Reconciliation issues" value={data.employee_work.reconciliation_issues} />
+          </div>
+          {data.employee_work.department_cases === 0 && <p className="empty">You have no department cases awaiting action. New work will appear when routed or assigned; this does not mean the organization has no documents.</p>}
+          <Button onClick={() => navigate("My Work")}>Open my work</Button>
+          <Detail title="Recent department decisions"><Table rows={data.employee_work.recent_decisions} /></Detail>
+          {data.employee_work.previous_sign_in && <Detail title="Changes since your previous sign-in">
+            <p className="footnote">Since {data.employee_work.previous_sign_in} · recorded updates only</p>
+            <Table rows={data.employee_work.recent_changes} />
+          </Detail>}
+        </>}
+      </Panel>
       <Filters filters={filters} set={setFilters} />
       {loading && (
         <p className="loading" role="status">

@@ -45,6 +45,32 @@ class WebTests(PipelineFixture):
         rows=self.client.get('/api/documents').json()['rows']
         self.assertNotIn(self.contract,[row['id'] for row in rows])
 
+    def test_single_upload_removes_temporary_source_on_success_and_failure_without_results(self):
+        import tempfile
+        from idp.pipeline.agentic_pipeline import AgenticDocumentPipeline
+        temporary=[]
+        actual=tempfile.TemporaryDirectory
+        def directory(*args,**kwargs):
+            result=actual(*args,dir=self.root,**kwargs)
+            temporary.append(Path(result.name))
+            return result
+        self.llm.kind='invoice'
+        self.llm.fields={'invoice_number':'TEMP-1','seller':'Cedar','client':'Orbit','issue_date':'2026-10-01','total':'INR 100.00'}
+        self.app=create_app(self.repo.db_path,pipeline_factory=lambda repo:AgenticDocumentPipeline(repo.db_path,baseline=self.baseline,llm=self.llm,session_token=repo.session_token))
+        client=TestClient(self.app,headers={'x-idp-request':'1'});self.login(client=client)
+        stream=io.BytesIO();pdf=canvas.Canvas(stream);pdf.drawString(50,750,'Synthetic cleanup invoice');pdf.save()
+        results_before={str(p) for p in Path('results').iterdir()} if Path('results').exists() else set()
+        def upload():
+            return client.post('/api/uploads/single',files=[('files',('invoice.pdf',stream.getvalue(),'application/pdf'))],data={'consent':'true'})
+        with patch('idp.web.api.tempfile.TemporaryDirectory',side_effect=directory):
+            self.assertEqual(upload().status_code,200)
+            with patch.object(self.baseline,'process',side_effect=ValueError('Synthetic OCR failure')):
+                response=client.post('/api/uploads/single',files=[('files',('invoice.pdf',stream.getvalue(),'application/pdf'))],data={'consent':'true','force':'true'})
+                self.assertEqual(response.status_code,502)
+        self.assertEqual(len(temporary),2)
+        self.assertTrue(all(not p.exists() for p in temporary))
+        self.assertEqual({str(p) for p in Path('results').iterdir()} if Path('results').exists() else set(),results_before)
+
     def test_review_revision_permission_and_safe_approval(self):
         self.login('web-finance')
         payload={'expected_revision':999,'reason':'Reviewed evidence','confirmed':True,'decision':'rejected'}
@@ -292,3 +318,304 @@ class WebTests(PipelineFixture):
         summary = self.client.get(f'/api/batches/{job}').json()
         self.assertEqual(summary['counts']['failed'], 0)
         self.assertEqual(summary['counts']['completed'], 1)
+
+    def employee(self, username, role):
+        response=self.client.post('/api/users',json={'username':username,'password':self.password,'role':role,'departments':[]})
+        self.assertEqual(response.status_code,200,response.text)
+        client=TestClient(self.app,headers={'x-idp-request':'1'})
+        self.login(username,client)
+        return client,response.json()['id']
+
+    def departmental_app(self):
+        from idp.pipeline.agentic_pipeline import AgenticDocumentPipeline
+        self.app=create_app(self.repo.db_path,pipeline_factory=lambda repo:AgenticDocumentPipeline(repo.db_path,
+            baseline=self.baseline,llm=self.llm,session_token=repo.session_token))
+        self.client=TestClient(self.app,headers={'x-idp-request':'1'})
+        self.login()
+
+    def employee_upload(self,client,kind,fields,name):
+        self.llm.kind,self.llm.fields=kind,fields
+        stream=io.BytesIO();pdf=canvas.Canvas(stream);pdf.drawString(50,750,name);pdf.save()
+        response=client.post('/api/uploads/batch',files=[('files',(name+'.pdf',stream.getvalue(),'application/pdf'))],
+            data={'consent':'true','request_key':name})
+        self.assertEqual(response.status_code,200,response.text)
+        job=response.json()['batch_id']
+        run=client.post(f'/api/batches/{job}/run',json={'consent':True})
+        self.assertEqual(run.status_code,200,run.text)
+        summary=client.get(f'/api/batches/{job}').json()
+        self.assertEqual(summary['counts']['failed'],0,summary)
+        return summary['items'][0]['document_id'],job
+
+    def test_employee_shared_po_matching_and_reference_permissions(self):
+        self.departmental_app()
+        procurement,_=self.employee('procurement-one','Procurement Reviewer')
+        finance,_=self.employee('finance-one','Finance Reviewer')
+        legal,_=self.employee('legal-one','Legal Reviewer')
+        po,po_job=self.employee_upload(procurement,'purchase_order',{'po_number':'PO-TEAM','vendor':'Cedar','order_date':'2026-10-01','total':'INR 100.00'},'team-po')
+        invoice,job=self.employee_upload(finance,'invoice',{'invoice_number':'INV-TEAM','seller':'Cedar','client':'Orbit','issue_date':'2026-10-01','total':'INR 100.00','po_reference':'PO-TEAM'},'team-invoice')
+        detail=finance.get(f'/api/documents/{invoice}').json()
+        self.assertEqual(detail['full_result']['cross_document_status'],'matched')
+        self.assertEqual(detail['collaboration']['processed_by']['username'],'finance-one')
+        self.assertEqual(detail['collaboration']['related_documents'][0]['id'],po)
+        linked=finance.get(f'/api/documents/{po}').json()
+        self.assertFalse(linked['collaboration']['can_review'])
+        self.assertEqual(linked['collaboration']['processed_by']['username'],'procurement-one')
+        payload={'expected_revision':linked['revision'],'confirmed':True,'reason':'Forbidden PO mutation','decision':'approved'}
+        self.assertEqual(finance.post(f'/api/documents/{po}/decision',json=payload).status_code,403)
+        self.assertEqual(legal.get(f'/api/documents/{invoice}').status_code,403)
+        self.assertEqual(finance.get(f'/api/batches/{po_job}').status_code,403)
+        self.assertEqual([row['id'] for row in finance.get('/api/batches').json()],[job])
+        related=finance.get('/api/review?view=related').json()
+        self.assertTrue(related['read_only'])
+        self.assertIn(po,[row['id'] for row in related['rows']])
+        self.assertNotIn(po,[row['id'] for row in finance.get('/api/review').json()['rows']])
+
+    def test_two_employees_claim_concurrency_reassignment_and_persistence(self):
+        one,one_id=self.employee('finance-one','Finance Reviewer')
+        two,two_id=self.employee('finance-two','Finance Reviewer')
+        self.assertEqual(one.get('/api/review?view=mine').json()['total'],0)
+        before=one.get(f'/api/documents/{self.invoice}').json()
+        body={'expected_revision':before['revision'],'confirmed':True,'reason':'Take responsibility','action':'claim'}
+        self.assertEqual(one.post(f'/api/documents/{self.invoice}/case',json=body).status_code,200)
+        visible=two.get(f'/api/documents/{self.invoice}').json()
+        self.assertEqual(visible['case']['assignee'],f'user:{one_id}:finance-one')
+        self.assertFalse(visible['collaboration']['can_review'])
+        self.assertEqual(two.post(f'/api/documents/{self.invoice}/case',json=body).status_code,403)
+        self.assertEqual(one.post(f'/api/documents/{self.invoice}/case',json=body).status_code,409)
+        self.assertEqual(one.post('/api/logout').status_code,200)
+        self.login('finance-one',one)
+        self.assertEqual(one.get('/api/review?view=mine').json()['total'],1)
+        self.assertEqual(two.get('/api/review?view=mine').json()['total'],0)
+        changed={**body,'expected_revision':visible['revision'],'action':'assign','team':'Finance','assignee':f'user:{two_id}:finance-two'}
+        self.assertEqual(self.client.post(f'/api/documents/{self.invoice}/case',json=changed).status_code,200)
+        self.assertEqual(two.get('/api/review?view=mine').json()['total'],1)
+        self.assertEqual(one.get('/api/review?view=mine').json()['total'],0)
+        history=two.get(f'/api/documents/{self.invoice}').json()['events']
+        self.assertEqual(history[-1]['actor'],f'user:{one_id}:finance-one')
+        self.assertEqual(history[-1]['new_values']['actor_context']['departments'],['Finance'])
+
+    def test_reconciliation_handoff_preserves_guard_and_department_visibility(self):
+        self.departmental_app()
+        finance,_=self.employee('finance-one','Finance Reviewer')
+        procurement,_=self.employee('procurement-one','Procurement Reviewer')
+        self.llm.kind='purchase_order'
+        self.llm.fields={'po_number':'PO-MISMATCH','vendor':'Cedar','order_date':'2026-10-01','total':'INR 200.00'}
+        baseline=self.baseline_result(None)
+        baseline.ocr.full_text+='\nCorrect total: INR 100.00'
+        with patch.object(self.baseline,'process',return_value=baseline):
+            po,_=self.employee_upload(procurement,'purchase_order',self.llm.fields,'mismatch-po')
+        invoice,_=self.employee_upload(finance,'invoice',{'invoice_number':'INV-MISMATCH','seller':'Cedar','client':'Orbit','issue_date':'2026-10-01','total':'INR 100.00','po_reference':'PO-MISMATCH'},'mismatch-invoice')
+        before=finance.get(f'/api/documents/{invoice}').json()
+        self.assertEqual(before['case']['team'],'Finance')
+        body={'expected_revision':before['revision'],'reason':'Procurement investigate PO amount','confirmed':True,'action':'handoff','team':'Procurement'}
+        self.assertEqual(finance.post(f'/api/documents/{invoice}/case',json={**body,'team':'Legal'}).status_code,400)
+        self.assertEqual(finance.post(f'/api/documents/{invoice}/case',json=body).status_code,200)
+        transferred=procurement.get(f'/api/documents/{invoice}').json()
+        self.assertEqual(transferred['case']['team'],'Procurement')
+        self.assertTrue(transferred['collaboration']['can_review'])
+        self.assertFalse(finance.get(f'/api/documents/{invoice}').json()['collaboration']['can_review'])
+        approval={'expected_revision':transferred['revision'],'reason':'Must not bypass mismatch','confirmed':True,'decision':'approved'}
+        self.assertEqual(procurement.post(f'/api/documents/{invoice}/decision',json=approval).status_code,400)
+        self.assertEqual(finance.post(f'/api/documents/{po}/case',json={**body,'expected_revision':self.repo.get_document(po)['revision']}).status_code,403)
+        self.assertEqual(transferred['events'][0]['event_type'],'handoff')
+        self.assertEqual(transferred['events'][0]['previous_values']['team'],'Finance')
+        back={**body,'expected_revision':transferred['revision'],'team':'Finance'}
+        self.assertEqual(procurement.post(f'/api/documents/{invoice}/case',json=back).status_code,400)
+        po_state=procurement.get(f'/api/documents/{po}').json()
+        correction={'expected_revision':po_state['revision'],'confirmed':True,'reason':'Correct total supported by original OCR','changes':{'total':'INR 100.00'},'evidence':{'total':'Correct total: INR 100.00'}}
+        self.assertEqual(procurement.post(f'/api/documents/{po}/correction',json=correction).status_code,200)
+        changed=procurement.get(f'/api/documents/{invoice}').json()
+        self.assertEqual(changed['full_result']['cross_document_status'],'incomplete')
+        self.assertEqual(changed['review_decision'],'needs_correction')
+        back['expected_revision']=changed['revision']
+        self.assertEqual(procurement.post(f'/api/documents/{invoice}/case',json=back).status_code,200)
+        ready=finance.get(f'/api/documents/{invoice}').json()
+        self.assertEqual(ready['case']['team'],'Finance')
+        self.assertEqual(ready['full_result']['cross_document_status'],'matched')
+        self.assertEqual(ready['review_decision'],'pending')
+        self.assertFalse(procurement.get(f'/api/documents/{invoice}').json()['collaboration']['can_review'])
+
+
+    def test_document_reviewer_corrects_supported_evidence_and_returns_to_finance(self):
+        self.departmental_app()
+        finance,_=self.employee('finance-one','Finance Reviewer')
+        reviewer,_=self.employee('document-one','Document Reviewer')
+        self.llm.kind='invoice'
+        self.llm.fields={'invoice_number':'INV-FIX','seller':'Cedar','client':'Orbit','issue_date':'2026-10-01'}
+        from types import SimpleNamespace
+        baseline=self.baseline_result(None)
+        baseline.ocr.full_text+='\nTotal: INR 100.00'
+        with patch.object(self.baseline,'process',return_value=baseline):
+            invoice,_=self.employee_upload(finance,'invoice',self.llm.fields,'incomplete-invoice')
+        doc=reviewer.get(f'/api/documents/{invoice}').json()
+        self.assertEqual(doc['case']['team'],'Document Review')
+        self.assertFalse(finance.get(f'/api/documents/{invoice}').json()['collaboration']['can_review'])
+        body={'expected_revision':doc['revision'],'confirmed':True,'reason':'Recover missing total from original OCR','changes':{'total':'INR 100.00'},'evidence':{'total':'Total: INR 100.00'}}
+        self.assertEqual(reviewer.post(f'/api/documents/{invoice}/correction',json=body).status_code,200)
+        corrected=finance.get(f'/api/documents/{invoice}').json()
+        self.assertEqual(corrected['case']['team'],'Finance')
+        self.assertTrue(corrected['collaboration']['can_review'])
+        self.assertEqual(corrected['review_decision'],'pending')
+        returned_reference=reviewer.get(f'/api/documents/{invoice}')
+        self.assertEqual(returned_reference.status_code,200)
+        self.assertFalse(returned_reference.json()['collaboration']['can_review'])
+        self.assertIsNone(self.repo.get_document(invoice)['full_result'].get('human_evidence_errors',{}).get('total'))
+        self.assertNotIn('total',__import__('json').loads(corrected['versions'][0]['original_state'])['extracted_fields'])
+
+    def test_employee_credentials_reset_deactivation_and_no_role_self_assignment(self):
+        employee,user_id=self.employee('finance-one','Finance Reviewer')
+        revision=next(u['revision'] for u in self.client.get('/api/users').json()['users'] if u['id']==user_id)
+        new_password=secrets.token_urlsafe(24)
+        reset={'expected_revision':revision,'new_password':new_password,'confirmed':True}
+        self.assertEqual(employee.post(f'/api/users/{user_id}/credentials',json=reset).status_code,403)
+        self.assertEqual(self.client.post(f'/api/users/{user_id}/credentials',json=reset).status_code,200)
+        self.assertEqual(employee.get('/api/session').status_code,401)
+        self.assertEqual(employee.post('/api/login',json={'username':'finance-one','password':self.password}).status_code,401)
+        self.assertEqual(employee.post('/api/login',json={'username':'finance-one','password':new_password}).status_code,200)
+        self.assertEqual(employee.post('/api/users',json={'username':'elevated','password':new_password,'role':'Administrator','departments':[]}).status_code,403)
+        revision+=1
+        self.assertEqual(self.client.post(f'/api/users/{user_id}',json={'expected_revision':revision,'role':'Finance Reviewer','departments':[],'active':False,'confirmed':True}).status_code,200)
+        self.assertEqual(employee.get('/api/session').status_code,401)
+        with self.repo.connect() as db:
+            events=[str(tuple(row)) for row in db.execute('SELECT * FROM security_events')]
+            self.assertNotIn(new_password,' '.join(events))
+            self.assertTrue(any('credentials_reset' in event for event in events))
+
+    def test_new_employee_dashboard_and_returning_work_scope(self):
+        expense,_=self.employee('expense-one','Expense Reviewer')
+        overview=expense.get('/api/overview').json()
+        self.assertEqual(overview['employee_work']['department_cases'],0)
+        self.assertGreater(len(self.repo.list_documents()),0)
+        self.assertEqual(overview['employee_work']['assigned_to_me'],0)
+        self.assertEqual(overview['employee_work']['previous_sign_in'],None)
+        self.assertEqual(expense.post('/api/logout').status_code,200)
+        self.login('expense-one',expense)
+        overview=expense.get('/api/overview').json()
+        self.assertIsNotNone(overview['employee_work']['previous_sign_in'])
+        self.assertEqual(overview['employee_work']['recent_changes'],[])
+        self.assertEqual(expense.get('/api/review?view=mine').json()['total'],0)
+
+    def test_departmental_intake_cannot_probe_private_duplicates_or_force_reprocess(self):
+        self.departmental_app()
+        finance,_=self.employee('finance-one','Finance Reviewer')
+        from idp.storage.repository import DocumentRepository
+        from idp.security.auth import AccessDenied
+        token=finance.cookies.get('idp_session')
+        repo=DocumentRepository(self.repo.db_path,session_token=token)
+        with self.assertRaises(AccessDenied): repo.find_by_hash(self.repo.get_document(self.contract)['file_hash'])
+        stream=io.BytesIO();pdf=canvas.Canvas(stream);pdf.drawString(50,750,'Only administrator may force');pdf.save()
+        denied=finance.post('/api/uploads/batch',files=[('files',('force.pdf',stream.getvalue(),'application/pdf'))],data={'consent':'true','force':'true','request_key':'unauthorized-force'})
+        self.assertEqual(denied.status_code,403)
+        self.assertEqual(finance.get('/api/policies').status_code,403)
+
+    def test_employee_department_change_revokes_old_work_and_owned_jobs(self):
+        self.departmental_app()
+        finance,user_id=self.employee('changing-employee','Finance Reviewer')
+        invoice,job=self.employee_upload(finance,'invoice',{'invoice_number':'INV-CHANGE','seller':'Cedar','client':'Orbit','issue_date':'2026-10-01','total':'INR 100.00'},'role-change-invoice')
+        revision=next(user['revision'] for user in self.client.get('/api/users').json()['users'] if user['id']==user_id)
+        self.assertEqual(self.client.post(f'/api/users/{user_id}',json={'expected_revision':revision,'role':'Legal Reviewer','departments':['Finance'],'active':True,'confirmed':True}).status_code,200)
+        self.assertEqual(finance.get('/api/session').status_code,401)
+        self.login('changing-employee',finance)
+        self.assertEqual(finance.get('/api/session').json()['departments'],['Legal'])
+        self.assertEqual(finance.get(f'/api/documents/{invoice}').status_code,403)
+        self.assertEqual(finance.get(f'/api/batches/{job}').status_code,403)
+        self.assertEqual(finance.get('/api/batches').json(),[])
+        self.assertEqual(finance.get('/api/review?view=mine').json()['total'],0)
+
+    def test_wrong_department_intake_cannot_persist_or_disclose_results(self):
+        self.departmental_app()
+        finance,_=self.employee('finance-one','Finance Reviewer')
+        self.llm.kind='contract'
+        self.llm.fields={'contract_title':'Confidential Legal Fixture','party_a':'Cedar','party_b':'Orbit','effective_date':'2026-10-01'}
+        stream=io.BytesIO();pdf=canvas.Canvas(stream);pdf.drawString(50,750,'Wrong department synthetic file');pdf.save()
+        before=len(self.repo.list_documents())
+        response=finance.post('/api/uploads/batch',files=[('files',('wrong.pdf',stream.getvalue(),'application/pdf'))],data={'consent':'true','request_key':'wrong-type'})
+        self.assertEqual(response.status_code,200)
+        job=response.json()['batch_id']
+        self.assertEqual(finance.post(f'/api/batches/{job}/run',json={'consent':True}).status_code,200)
+        summary=finance.get(f'/api/batches/{job}').json()
+        self.assertEqual(summary['counts']['failed'],1)
+        self.assertIsNone(summary['items'][0]['document_id'])
+        self.assertNotIn('Confidential Legal Fixture',str(summary))
+        self.assertEqual(len(self.repo.list_documents()),before)
+
+    def test_ui_setup_endpoint_requires_local_credential_and_disables_after_success(self):
+        from idp.storage.repository import DocumentRepository
+        from idp.security import INTERNAL
+        path=self.root/'first_install.db';app=create_app(path)
+        client=TestClient(app,headers={'x-idp-request':'1'})
+        self.assertEqual(client.get('/api/onboarding').json(),{'setup_required':True,'setup_authorized':False})
+        body={'username':'initial-admin','password':self.password,'setup_token':'x'*43}
+        self.assertEqual(client.post('/api/setup',json=body).status_code,401)
+        self.assertEqual(client.post('/api/registrations',json={'username':'early-employee','password':self.password}).status_code,400)
+        repo=DocumentRepository(path,_capability=INTERNAL)
+        token=AuthService(repo).authorize_setup(capability=INTERNAL)
+        self.assertTrue(client.get('/api/onboarding').json()['setup_authorized'])
+        for malformed in ({**body,'setup_token':token,'unexpected':token},
+                          {**body,'setup_token':token,'password':self.password*20},
+                          {**body,'setup_token':'short-private-value'}):
+            invalid=client.post('/api/setup',json=malformed)
+            self.assertEqual(invalid.status_code,422)
+            for secret in (token,self.password,'short-private-value'):
+                self.assertNotIn(secret,invalid.text)
+        body['setup_token']=token
+        response=client.post('/api/setup',json=body)
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertNotIn(token,response.text+client.get('/api/onboarding').text)
+        self.assertEqual(client.post('/api/setup',json=body).status_code,401)
+        self.assertEqual(client.post('/api/login',json={'username':'initial-admin','password':self.password}).status_code,200)
+        self.assertEqual(client.get('/api/session').json()['role'],'Administrator')
+
+    def test_pending_http_registration_has_no_access_until_admin_approval(self):
+        pending=TestClient(self.app,headers={'x-idp-request':'1'})
+        body={'username':'pending-finance','password':self.password}
+        response=pending.post('/api/registrations',json=body)
+        self.assertEqual(response.status_code,200)
+        self.assertEqual(response.json(),pending.post('/api/registrations',json=body).json())
+        self.assertEqual(response.json(),pending.post('/api/registrations',json={'username':'web-admin','password':self.password}).json())
+        self.assertEqual(pending.post('/api/registrations',json={**body,'role':'Administrator','departments':['Legal']}).status_code,422)
+        self.assertEqual(pending.post('/api/login',json=body).status_code,401)
+        for route in ('/api/session','/api/documents','/api/overview','/api/analytics','/api/review','/api/users','/api/batches','/api/audit'):
+            self.assertEqual(pending.get(route).status_code,401,route)
+        self.assertEqual(pending.post('/api/downloads',json={'kind':'document_json','resource':{'document_id':self.invoice}}).status_code,401)
+        request=self.client.get('/api/users').json()['registration_requests'][0]
+        self.assertNotIn('password_hash',request)
+        approval={'expected_revision':request['revision'],'role':'Finance Reviewer','departments':['Legal'],'confirmed':True}
+        self.assertEqual(pending.post(f"/api/registrations/{request['id']}/approve",json=approval).status_code,401)
+        self.assertEqual(self.client.post(f"/api/registrations/{request['id']}/approve",json=approval).status_code,200)
+        self.assertEqual(self.client.post(f"/api/registrations/{request['id']}/approve",json=approval).status_code,400)
+        self.assertEqual(pending.post('/api/login',json=body).status_code,200)
+        self.assertEqual(pending.get('/api/session').json()['departments'],['Finance'])
+        self.assertEqual(pending.get(f'/api/documents/{self.invoice}').status_code,200)
+        self.assertEqual(pending.get(f'/api/documents/{self.contract}').status_code,403)
+        self.assertEqual(pending.post('/api/logout').status_code,200)
+        self.assertEqual(pending.post('/api/login',json=body).status_code,200)
+        self.assertEqual(pending.get(f'/api/documents/{self.invoice}').status_code,200)
+
+    def test_registration_approval_requires_administrator_and_current_revision(self):
+        anonymous=TestClient(self.app,headers={'x-idp-request':'1'})
+        anonymous.post('/api/registrations',json={'username':'request-one','password':self.password})
+        request=self.client.get('/api/users').json()['registration_requests'][0]
+        approval={'expected_revision':99,'role':'Legal Reviewer','departments':[],'confirmed':True}
+        self.assertEqual(self.client.post(f"/api/registrations/{request['id']}/approve",json=approval).status_code,400)
+        finance=TestClient(self.app,headers={'x-idp-request':'1'});self.login('web-finance',finance)
+        approval['expected_revision']=request['revision']
+        self.assertEqual(finance.post(f"/api/registrations/{request['id']}/approve",json=approval).status_code,403)
+        approval['confirmed']=False
+        self.assertEqual(self.client.post(f"/api/registrations/{request['id']}/approve",json=approval).status_code,422)
+
+    def test_concurrent_http_bootstrap_only_one_winner(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from idp.storage.repository import DocumentRepository
+        from idp.security import INTERNAL
+        path=self.root/'concurrent_http_setup.db'
+        repo=DocumentRepository(path,_capability=INTERNAL)
+        token=AuthService(repo).authorize_setup(capability=INTERNAL)
+        app=create_app(path)
+        def submit(index):
+            client=TestClient(app,headers={'x-idp-request':'1'})
+            return client.post('/api/setup',json={'username':f'first-admin-{index}','password':self.password,'setup_token':token}).status_code
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            statuses=list(executor.map(submit,range(2)))
+        self.assertEqual(statuses.count(200),1,statuses)
+        with repo.connect() as db:self.assertEqual(db.execute('SELECT count(*) FROM users').fetchone()[0],1)

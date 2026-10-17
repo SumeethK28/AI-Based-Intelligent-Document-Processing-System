@@ -1,7 +1,7 @@
 import { useState, useContext } from "react";
 
 import { ShieldCheck } from "lucide-react";
-import { api, RecordData } from "./api";
+import { api, RecordData, Session } from "./api";
 
 import {
   words,
@@ -206,12 +206,19 @@ export function Policies() {
 export function People() {
   const { data, error } = useLoad("/users"),
     { run } = useContext(ActionContext),
+    [requestId, setRequestId] = useState(""),
+    [approvalRole, setApprovalRole] = useState("Finance Reviewer"),
+    [approvalDepartments, setApprovalDepartments] = useState<string[]>([]),
+    [approvalConfirmed, setApprovalConfirmed] = useState(false),
     [username, setUsername] = useState(""),
     [password, setPassword] = useState(""),
     [role, setRole] = useState("Finance Reviewer"),
     [departments, setDepartments] = useState<string[]>([]),
     [id, setId] = useState(""),
     [active, setActive] = useState(true),
+    [resetPassword, setResetPassword] = useState(""),
+    [resetAgain, setResetAgain] = useState(""),
+    [resetConfirmed, setResetConfirmed] = useState(false),
     [editRole, setEditRole] = useState("Finance Reviewer"),
     [editDepartments, setEditDepartments] = useState<string[]>([]),
     [confirmed, setConfirmed] = useState(false);
@@ -235,6 +242,22 @@ export function People() {
   );
   return (
     <>
+      <Panel title="Pending employee registrations">
+        <p className="footnote">Requests have no login, document or department access until you approve a role and scope. Passwords are never displayed.</p>
+        <Table rows={data.registration_requests ?? []} keys={["username", "status", "created_at"]} />
+        {!!data.registration_requests?.length && <>
+          <Select label="Registration request" value={requestId} set={(value) => {setRequestId(value); setApprovalConfirmed(false);}} options={["", ...data.registration_requests.map((row: RecordData) => String(row.id))]} labels={Object.fromEntries([["", "Choose a pending employee"], ...data.registration_requests.map((row: RecordData) => [String(row.id), row.username])])} />
+          <Select label="Approved employee role" value={approvalRole} set={(value) => {setApprovalRole(value); setApprovalConfirmed(false);}} options={data.roles} />
+          {data.role_departments?.[approvalRole] ? <p>Department: {data.role_departments[approvalRole]}</p> : approvalRole === "Administrator" ? <p>Organization-wide administrator scope</p> : scopes(approvalDepartments, setApprovalDepartments)}
+          <Confirm value={approvalConfirmed} set={setApprovalConfirmed}>I verified this employee and approve the selected role and department.</Confirm>
+          <Button disabled={!requestId || !approvalConfirmed} onClick={() => run(async () => {
+            const request = data.registration_requests.find((row: RecordData) => String(row.id) === requestId);
+            if (!request) return;
+            await api(`/registrations/${requestId}/approve`, { expected_revision: request.revision, role: approvalRole, departments: approvalDepartments, confirmed: approvalConfirmed });
+            setRequestId(""); setApprovalConfirmed(false);
+          })}>Approve employee registration</Button>
+        </>}
+      </Panel>
       <Panel title="Individual accounts">
         <p className="account-list-caption">
           {data.users.length} accounts ·{" "}
@@ -307,7 +330,7 @@ export function People() {
             set={setRole}
             options={data.roles}
           />
-          {scopes(departments, setDepartments)}
+          {data.role_departments?.[role] ? <p>Department: {data.role_departments[role]}</p> : role === "Administrator" ? <p>Organization-wide administrator scope</p> : scopes(departments, setDepartments)}
           <Button
             primary
             disabled={!username || password.length < 12}
@@ -335,8 +358,10 @@ export function People() {
                 setEditDepartments(JSON.parse(user.departments));
               }
               setConfirmed(false);
+              setResetPassword(""); setResetAgain(""); setResetConfirmed(false);
             }}
             options={["", ...data.users.map((u: any) => String(u.id))]}
+            labels={Object.fromEntries([["", "Choose an employee"], ...data.users.map((u: any) => [String(u.id), u.username])])}
           />
           {selected && (
             <>
@@ -350,7 +375,7 @@ export function People() {
                 set={setEditRole}
                 options={data.roles}
               />
-              {scopes(editDepartments, setEditDepartments)}
+              {data.role_departments?.[editRole] ? <p>Department: {data.role_departments[editRole]}</p> : editRole === "Administrator" ? <p>Organization-wide administrator scope</p> : scopes(editDepartments, setEditDepartments)}
               <Confirm value={confirmed} set={setConfirmed}>
                 I confirm this access change and revocation of existing
                 sessions.
@@ -371,6 +396,16 @@ export function People() {
               >
                 Save account access
               </Button>
+              <Detail title="Reset employee credentials">
+                <p className="footnote">Verify the employee identity outside this application. Share the new password privately; existing sessions will be revoked. Employees can change it from My account. For your own account, use Change your password.</p>
+                <TextField label="New employee password" value={resetPassword} set={setResetPassword} type="password" />
+                <TextField label="Repeat employee password" value={resetAgain} set={setResetAgain} type="password" />
+                <Confirm value={resetConfirmed} set={setResetConfirmed}>I verified the employee and confirm the credential reset.</Confirm>
+                <Button disabled={!resetConfirmed || resetPassword.length < 12 || resetPassword !== resetAgain} onClick={() => run(async () => {
+                  await api(`/users/${id}/credentials`, {expected_revision: selected.revision, new_password: resetPassword, confirmed: resetConfirmed});
+                  setResetPassword(""); setResetAgain(""); setResetConfirmed(false);
+                })}>Reset credentials & revoke sessions</Button>
+              </Detail>
             </>
           )}
         </Panel>
@@ -472,4 +507,58 @@ export function Account() {
       </Button>
     </Detail>
   );
+}
+
+
+export function AccessScreen({ onSignedIn, error }: { onSignedIn: (value: Session) => void; error: string }) {
+  const { run, busy } = useContext(ActionContext);
+  const { data: onboarding } = useLoad("/onboarding");
+  const [mode, setMode] = useState("sign-in");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [again, setAgain] = useState("");
+  const [notice, setNotice] = useState("");
+  const [setupToken, setSetupToken] = useState("");
+  const choose = (value: string) => {
+    setMode(value); setPassword(""); setAgain(""); setSetupToken(""); setNotice("");
+  };
+  const registration = mode === "register";
+  const setup = mode === "setup" && onboarding?.setup_required && onboarding?.setup_authorized;
+  return <div className="signin-form">
+    <div className="brand mobile-brand"><span className="brand-mark">d</span>Document Operations</div>
+    <h2>{setup ? "Create administrator account" : registration ? "Create account" : "Sign in"}</h2>
+    <div className="access-options">
+      {registration ? <Button onClick={() => choose("sign-in")}>Sign in</Button> : <Button onClick={() => choose("register")}>Create account</Button>}
+      {onboarding?.setup_required && onboarding?.setup_authorized && !setup && <Button onClick={() => choose("setup")}>First-time setup</Button>}
+      {setup && <Button onClick={() => choose("sign-in")}>Sign in</Button>}
+    </div>
+    {notice && <p className="notice" role="status">{notice}</p>}
+    {error && <p className="notice error" role="alert">{error}</p>}
+    <form onSubmit={(event) => {
+      event.preventDefault();
+      run(async () => {
+        try {
+          if (setup) {
+            await api("/setup", { username, password, setup_token: setupToken });
+            setMode("sign-in"); setNotice("Account created. You can now sign in.");
+            window.dispatchEvent(new Event("idp-refresh"));
+          } else if (registration) {
+            await api("/registrations", { username, password });
+            setMode("sign-in"); setNotice("Request received. Sign in after your administrator approves your account.");
+          } else {
+            await api("/login", { username, password });
+            onSignedIn(await api<Session>("/session"));
+          }
+        } finally { setPassword(""); setAgain(""); setSetupToken(""); }
+      });
+    }}>
+      {setup && <TextField label="Setup code" value={setupToken} set={setSetupToken} name="setup_token" type="password" autoComplete="off" required />}
+      <TextField label="Account name" value={username} set={setUsername} name="username" autoComplete="username" required />
+      <TextField label={registration || setup ? "Password (12–128 characters)" : "Password"} value={password} set={setPassword} name="password" type="password" autoComplete={mode === "sign-in" ? "current-password" : "new-password"} required />
+      {mode !== "sign-in" && <TextField label="Repeat password" value={again} set={setAgain} name="repeat_password" type="password" autoComplete="new-password" required />}
+      <Button primary type="submit" disabled={busy || !username || !password || ((registration || setup) && (password.length < 12 || password.length > 128 || password !== again)) || (setup && !setupToken)}>
+        {busy ? "Please wait..." : registration || setup ? "Create account" : "Sign in"}
+      </Button>
+    </form>
+  </div>;
 }

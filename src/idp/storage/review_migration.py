@@ -66,7 +66,12 @@ def capture_version(repository, db, document_id, run_id, state, origin):
     version = db.execute('INSERT INTO processing_versions(document_id,run_id,origin,captured_at,original_state) VALUES(?,?,?,?,?)',
         (document_id,run_id,origin,now,json.dumps(state,ensure_ascii=False))).lastrowid
     db.execute('UPDATE documents SET processing_version_id=? WHERE id=?',(version,document_id))
+    team=state.get('assigned_department') or {'invoice':'Finance','purchase_order':'Procurement','receipt':'Expense Processing','contract':'Legal'}.get(state.get('document_type'),'Document Review')
+    # Finance investigates reconciliation exceptions; failed extraction/evidence
+    # still belongs to Document Review. This never changes validation or approval.
+    if state.get('document_type')=='invoice' and state.get('validation_passed') and state.get('risk_level')!='high' and state.get('cross_document_status') in {'unmatched','ambiguous','mismatch','incomplete'}:
+        team='Finance'
     db.execute('''INSERT INTO review_cases(document_id,team,updated_at) VALUES(?,?,?)
         ON CONFLICT(document_id) DO UPDATE SET team=excluded.team,assignee=NULL,case_status='open',updated_at=excluded.updated_at''',
-        (document_id,{'invoice':'Finance','purchase_order':'Procurement','receipt':'Expense Processing','contract':'Legal'}.get(state.get('document_type'),state.get('assigned_department','Document Review')),now))
+        (document_id,team,now))
     return version

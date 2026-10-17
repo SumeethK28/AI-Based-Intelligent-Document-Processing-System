@@ -2,6 +2,7 @@
 import copy
 import json
 import re
+from idp.security.auth import AccessDenied, digest
 from datetime import datetime, timezone
 
 from idp.agents.validation_agent import ValidationAgent
@@ -149,6 +150,9 @@ class ReviewService:
         return dict(row)
 
     def event(self, db, document, event_type, previous, new, actor, reason, notes='',decision=None,state=None):
+        if not self.repository.internal:
+            principal=self.repository.require('account')
+            new={**new,'actor_context':{key:principal[key] for key in ('id','username','role','departments')}}
         updated = db.execute('SELECT revision FROM documents WHERE id=?',(document['id'],)).fetchone()[0]
         event_id = db.execute('''INSERT INTO review_events(document_id,processing_version_id,event_type,previous_values,new_values,
             actor,actor_kind,created_at,decision,reason,notes,validation_results,rule_versions,previous_revision,new_revision)
@@ -182,9 +186,14 @@ class ReviewService:
             db.execute('''UPDATE documents SET full_result=?,extracted_data=?,workflow_status=?,assigned_department=?,
                 review_decision='pending',review_notes=NULL,updated_at=? WHERE id=?''',
                 (json.dumps(state,ensure_ascii=False),json.dumps(state['extracted_fields'],ensure_ascii=False),state['workflow_status'],state['assigned_department'],self.repository.timestamp(),document_id))
-            db.execute("UPDATE review_cases SET case_status='in_review',updated_at=? WHERE document_id=?",(self.repository.timestamp(),document_id))
-            event_id = self.event(db,document,'correction',{'fields':original.get('extracted_fields',{}),'evidence':original.get('field_evidence',{})},
-                {'fields':state['extracted_fields'],'evidence':state.get('field_evidence',{}),'provenance':provenance},actor,reason,notes,state=state)
+            case=db.execute('SELECT team FROM review_cases WHERE document_id=?',(document_id,)).fetchone()
+            returned_to=state['assigned_department'] if case['team']=='Document Review' and state['workflow_status']=='pending_department_review' else None
+            if returned_to:
+                db.execute("UPDATE review_cases SET team=?,assignee=NULL,case_status='open',updated_at=? WHERE document_id=?",(returned_to,self.repository.timestamp(),document_id))
+            else:
+                db.execute("UPDATE review_cases SET case_status='in_review',updated_at=? WHERE document_id=?",(self.repository.timestamp(),document_id))
+            event_id = self.event(db,document,'correction',{'fields':original.get('extracted_fields',{}),'evidence':original.get('field_evidence',{}),'team':case['team']},
+                {'fields':state['extracted_fields'],'evidence':state.get('field_evidence',{}),'provenance':provenance,'team':returned_to or case['team']},actor,reason,notes,state=state)
             if document['document_type']=='purchase_order':
                 self.invalidate_dependents(db,document_id,'Referenced PO fields were corrected; fresh invoice review is required.')
         return event_id
@@ -238,6 +247,16 @@ class ReviewService:
             self.event(db,document,'po_dependency_change',{'decision':document['review_decision'],'cross_document_status':json.loads(document['full_result']).get('cross_document_status')},
                 {'decision':decision,'cross_document_status':'incomplete'},'system:review-dependency',reason,decision=decision,state=state)
 
+    @staticmethod
+    def handoff_departments(state,kind,current_team):
+        destination={'invoice':'Finance','purchase_order':'Procurement','receipt':'Expense Processing','contract':'Legal'}.get(kind)
+        choices={'Document Review'}
+        if state.get('workflow_status')=='pending_department_review' and destination: choices.add(destination)
+        if kind=='invoice' and current_team=='Procurement': choices.add('Finance')
+        if kind=='invoice' and state.get('cross_document_status') in {'unmatched','ambiguous','mismatch','incomplete'}:
+            choices.add('Procurement')
+        return sorted(choices-{current_team})
+
     def manage(self, document_id, expected_revision, action, *, actor, reason, team=None, assignee=None, status=None, priority=None):
         actor=self.repository.access.actor(actor,'assign' if action=='assign' else 'review',document_id)
         if action=='assign' and not self.repository.internal and assignee:
@@ -257,6 +276,19 @@ class ReviewService:
                 if case['assignee'] and case['assignee']!=actor.strip():
                     raise ReviewConflict('This case is already claimed. Use explicit reassignment with a reason.')
                 case.update(assignee=actor.strip(),case_status=case['case_status'] if case['case_status'] in {'awaiting_correction','escalated'} else 'in_review')
+            elif action=='handoff':
+                state=json.loads(document['full_result'])
+                permitted=self.handoff_departments(state,document['document_type'],case['team'])
+                if team not in permitted or team==case['team'] or case['case_status'] in {'approved','rejected'}:
+                    raise ValueError('Select a responsible department for this unresolved or corrected case.')
+                destination={'invoice':'Finance','purchase_order':'Procurement','receipt':'Expense Processing','contract':'Legal'}.get(document['document_type'])
+                if team==destination:
+                    state['document_id']=document_id
+                    state=self.validate(state)
+                    if state.get('workflow_status')!='pending_department_review' or state.get('risk_level')!='low':
+                        raise UnsafeApproval('Return blocked: resolve validation, evidence, reconciliation and risk issues first.')
+                    db.execute("UPDATE documents SET full_result=?,extracted_data=?,workflow_status=?,assigned_department=?,review_decision='pending',updated_at=? WHERE id=?",(json.dumps(state,ensure_ascii=False),json.dumps(state.get('extracted_fields',{}),ensure_ascii=False),state['workflow_status'],state['assigned_department'],self.repository.timestamp(),document_id))
+                case.update(team=team,assignee=None,case_status='open')
             elif action=='assign':
                 if team not in TEAMS or len(str(assignee or ''))>120:
                     raise ValueError('Select a supported team and a short operator identifier.')
@@ -276,7 +308,7 @@ class ReviewService:
                 (case['team'],case['assignee'],case['case_status'],case['priority'],case['updated_at'],document_id))
             # Assignment is a separate operational team, never a change of validated routing.
             db.execute('UPDATE documents SET revision=revision+1 WHERE id=?',(document_id,))
-            return self.event(db,document,action,previous,case,actor,reason)
+            return self.event(db,document,action,previous,case,actor,reason,state=state if action=='handoff' else None)
 
     def history(self, document_id):
         self.repository.access.document(document_id)
@@ -293,18 +325,21 @@ class ReviewService:
             row = db.execute('SELECT * FROM review_cases WHERE document_id=?',(document_id,)).fetchone()
         return dict(row) if row else None
 
-    def queue(self, filters=DocumentFilters(), *, team='', risk='', case_status='', assignee='', page=1, include_closed=False):
+    def queue(self, filters=DocumentFilters(), *, team='', risk='', case_status='', assignee='', page=1, include_closed=False, view='department'):
         where, parameters = OperationsQueries._where(filters)
         from idp.security.access import scoped_where
         where,parameters=scoped_where(self.repository,where,parameters,'review')
         extra=[]
+        if view not in {'department','mine','unclaimed'}: raise ValueError('Unsupported work view.')
+        if view=='mine':
+            principal=self.repository.require('review')
+            extra.append('c.assignee=?')
+            parameters.append(f"user:{principal['id']}:{principal['username']}")
+        elif view=='unclaimed': extra.append("coalesce(c.assignee,'')=''")
         if not include_closed and case_status not in {'approved','rejected'}:
             extra.append("c.case_status NOT IN ('approved','rejected')")
         if team:
-            if team=='Procurement':
-                extra.append("(c.team=? OR (d.document_type='invoice' AND json_extract(d.full_result,'$.cross_document_status') IN ('unmatched','ambiguous','mismatch','incomplete')))")
-            else:
-                extra.append('c.team=?')
+            extra.append('c.team=?')
             parameters.append(team)
         for column,value in (("json_extract(d.full_result,'$.risk_level')",risk),('c.case_status',case_status),('c.assignee',assignee)):
             if value:
@@ -329,3 +364,66 @@ class ReviewService:
             except (ValueError,TypeError):
                 row['age_days']=None
         return rows,total
+
+    def collaboration(self, document_id):
+        """Authorized context; references confer no decision-making permission."""
+        document=self.repository.get_document(document_id)
+        case=self.case(document_id)
+        state=document['full_result']
+        try:
+            self.repository.access.actor(None,'review',document_id)
+            can_review=True
+        except AccessDenied:
+            can_review=False
+        with self.repository._connect() as db:
+            origin=db.execute('SELECT original_state FROM processing_versions WHERE document_id=? ORDER BY id LIMIT 1',(document_id,)).fetchone()
+            upload=db.execute('SELECT actor_context,processed_at FROM processing_runs WHERE document_id=? AND actor_context IS NOT NULL ORDER BY id LIMIT 1',(document_id,)).fetchone()
+            submitted=db.execute('SELECT b.actor_context,b.created_at FROM batch_jobs b JOIN batch_items i ON i.batch_id=b.id WHERE i.document_id=? AND b.actor_context IS NOT NULL ORDER BY b.created_at,i.id LIMIT 1',(document_id,)).fetchone()
+            candidates=db.execute("SELECT id FROM documents WHERE id=? OR (document_type='invoice' AND json_extract(full_result,'$.matched_document_id')=?)",(state.get('matched_document_id'),document_id)).fetchall()
+        related=[]
+        for row in candidates:
+            try: linked=self.repository.get_document(row['id'])
+            except AccessDenied: continue
+            if linked:
+                related_case=self.case(linked['id'])
+                related.append({'id':linked['id'],'filename':linked['filename'],'document_type':linked['document_type'],
+                    'team':related_case['team'],'assignee':related_case['assignee'],'case_status':related_case['case_status'],
+                    'review_decision':linked['review_decision'],'last_updated':related_case['updated_at'],'read_only_reference':True})
+        return {'can_review':can_review,'original_department':json.loads(origin['original_state']).get('assigned_department') if origin else None,
+            'uploaded_by':json.loads(submitted['actor_context']) if submitted else None,'uploaded_at':submitted['created_at'] if submitted else None,
+            'processed_by':json.loads(upload['actor_context']) if upload else None,'processed_at':upload['processed_at'] if upload else None,
+            'current_department':case['team'],'assigned_reviewer':case['assignee'],'last_updated':max(document['updated_at'],case['updated_at']),
+            'related_documents':related,'handoff_departments':self.handoff_departments(state,document['document_type'],case['team']) if can_review else []}
+
+    def related_work(self, filters=DocumentFilters(), *, page=1):
+        self.repository.require('review')
+        where,args=OperationsQueries(self.repository)._scoped(filters)
+        own,own_args=self.repository.access.scope(mutation=True)
+        where+=' AND NOT ('+own+')'
+        args.extend(own_args)
+        query=' FROM documents d JOIN review_cases c ON c.document_id=d.id'+where
+        with self.repository._connect() as db:
+            total=db.execute('SELECT count(*)'+query,args).fetchone()[0]
+            rows=[dict(row) for row in db.execute('SELECT d.id,d.filename,d.document_type,d.workflow_status,d.review_decision,c.team,c.assignee,c.case_status,c.updated_at'+query+' ORDER BY c.updated_at DESC,d.id DESC LIMIT 20 OFFSET ?',[*args,(max(1,page)-1)*20])]
+        return rows,total
+
+    def work_summary(self, filters=DocumentFilters()):
+        principal=self.repository.require('review')
+        where,args=OperationsQueries._where(filters)
+        from idp.security.access import scoped_where
+        where,args=scoped_where(self.repository,where,args,'review')
+        actor=f"user:{principal['id']}:{principal['username']}"
+        with self.repository._connect() as db:
+            summary=dict(db.execute("SELECT count(*) AS department_cases,coalesce(sum(c.assignee=?),0) AS assigned_to_me,coalesce(sum(coalesce(c.assignee,'')=''),0) AS unclaimed,coalesce(sum(json_extract(d.full_result,'$.cross_document_status') IN ('mismatch','incomplete','unmatched','ambiguous')),0) AS reconciliation_issues FROM documents d JOIN review_cases c ON c.document_id=d.id"+where+(" AND " if where else " WHERE ")+"c.case_status NOT IN ('approved','rejected')",[actor,*args]).fetchone())
+            summary['recent_decisions']=[dict(row) for row in db.execute("SELECT e.document_id,d.filename,e.actor,e.decision,e.created_at FROM review_events e JOIN documents d ON d.id=e.document_id"+where+(" AND " if where else " WHERE ")+"e.event_type='decision' ORDER BY e.id DESC LIMIT 5",args)]
+        previous=None
+        if self.repository.session_token:
+            with self.repository._connect() as db:
+                previous=db.execute('SELECT max(created_at) FROM auth_sessions WHERE user_id=? AND created_at<(SELECT created_at FROM auth_sessions WHERE token_hash=?)',(principal['id'],digest(self.repository.session_token))).fetchone()[0]
+        summary['previous_sign_in']=datetime.fromtimestamp(previous,timezone.utc).isoformat() if previous else None
+        summary['recent_changes']=[]
+        if previous:
+            scope,params=self.repository.access.scope()
+            with self.repository._connect() as db:
+                summary['recent_changes']=[dict(row) for row in db.execute('SELECT d.id,d.filename,c.team,c.assignee,c.case_status,c.updated_at FROM documents d JOIN review_cases c ON c.document_id=d.id WHERE '+scope+' AND c.updated_at>? ORDER BY c.updated_at DESC LIMIT 5',[*params,summary['previous_sign_in']])]
+        return summary

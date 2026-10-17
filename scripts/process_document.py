@@ -15,6 +15,7 @@ def main():
     )
 
     parser.add_argument("document", help="Path to the document to process")
+    parser.add_argument("--output", type=Path, help="Explicit optional JSON export path; no result file is created by default")
 
     args = parser.parse_args()
 
@@ -134,18 +135,9 @@ def main():
         if result.validation.warnings:
             print("Warnings: " + ", ".join(result.validation.warnings))
 
-    output_path = (
-        Path("results")
-        / "processed"
-        / f"{document_path.stem}.json"
-    )
-
-    save_dataclass_json(result, output_path)
-
-    print(
-        f"\nResult saved to: "
-        f"{output_path}"
-    )
+    if args.output:
+        save_dataclass_json(result, args.output)
+        print(f"\nResult saved to: {args.output}")
 
     print("\nProcessing completed.")
 

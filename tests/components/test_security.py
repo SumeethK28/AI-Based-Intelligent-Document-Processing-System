@@ -279,7 +279,8 @@ class SecurityTests(PipelineFixture):
             self.assertEqual(sorted(executor.map(lambda _:decide(),range(2))),['saved','stale'])
         high=self.process('high.txt','invoice',{'invoice_number':'HIGH-1','issue_date':'2026-10-01','seller':'Supplier','client':'Buyer','total':'INR 100001.00'})['document_id']
         document=self.repo.get_document(high)
-        with self.assertRaises(UnsafeApproval): ReviewService(self.finance).decide(high,document['revision'],'approved',actor=None,reason='No high-value override')
+        with self.assertRaises(AccessDenied): ReviewService(self.finance).decide(high,document['revision'],'approved',actor=None,reason='Outside department ownership')
+        with self.assertRaises(UnsafeApproval): ReviewService(self.admin).decide(high,document['revision'],'approved',actor=None,reason='No high-value override')
         with self.repo.connect() as db:
             self.assertEqual(db.execute("SELECT count(*) FROM security_events WHERE event_type='blocked_review_approval'").fetchone()[0],1)
 
@@ -341,6 +342,155 @@ class SecurityTests(PipelineFixture):
             for table,records in before.items(): self.assertEqual([tuple(row) for row in db.execute('SELECT * FROM '+table)],records)
             self.assertFalse(db.execute('PRAGMA foreign_key_check').fetchall())
         self.assertEqual(len(list(self.root.glob('legacy.db.before_security_v1.*.db'))),1)
+
+    def test_collaboration_migration_preserves_legacy_records_and_is_idempotent(self):
+        path=self.root/'pre_collaboration.db'
+        with self.repo.connect() as source:
+            with closing(sqlite3.connect(path)) as target: source.backup(target)
+        with closing(sqlite3.connect(path)) as db:
+            db.execute('DROP INDEX batch_submitter')
+            db.execute('DROP INDEX cases_assignee')
+            db.execute('ALTER TABLE batch_jobs DROP COLUMN submitted_by')
+            db.execute('ALTER TABLE batch_jobs DROP COLUMN actor_context')
+            db.execute('ALTER TABLE processing_runs DROP COLUMN actor_context')
+            tables=('documents','processing_runs','processing_versions','review_events','users','auth_sessions','security_events')
+            before={table:db.execute('SELECT * FROM '+table).fetchall() for table in tables}
+            columns={table:[row[1] for row in db.execute('PRAGMA table_info('+table+')')] for table in tables}
+            db.commit()
+        migrated=DocumentRepository(path,_capability=INTERNAL)
+        DocumentRepository(path,_capability=INTERNAL)
+        with migrated.connect() as db:
+            for table in tables:
+                after=[tuple(row) for row in db.execute('SELECT '+','.join(columns[table])+' FROM '+table)]
+                self.assertEqual(after,before[table],table)
+            self.assertEqual(db.execute('SELECT count(*) FROM processing_runs WHERE actor_context IS NOT NULL').fetchone()[0],0)
+            self.assertFalse(db.execute('PRAGMA foreign_key_check').fetchall())
+        self.assertEqual(len(list(self.root.glob('pre_collaboration.db.before_collaboration_v1.*.db'))),1)
+
+    def test_supported_role_matrix_and_department_labels(self):
+        from idp.security.auth import ROLES,REVIEW_DEPARTMENT
+        from idp.security.access import PERMISSIONS
+        self.assertEqual(ROLES,('Administrator','Finance Reviewer','Procurement Reviewer','Expense Reviewer','Legal Reviewer','Document Reviewer','Auditor','Operations Manager'))
+        self.assertEqual(set(PERMISSIONS),set(ROLES))
+        for role,department in REVIEW_DEPARTMENT.items():
+            self.assertIn('review',PERMISSIONS[role])
+            self.assertIn('intake',PERMISSIONS[role])
+            self.assertNotIn('assign',PERMISSIONS[role])
+            self.assertEqual(__import__('json').loads(AuthService.role_values(role,['Legal'])[1]),[department])
+        self.assertNotIn('review',PERMISSIONS['Auditor'])
+        self.assertNotIn('documents',PERMISSIONS['Operations Manager'])
+
+    def test_first_setup_requires_local_capability_and_expiring_rotated_credential(self):
+        repo=DocumentRepository(self.root/'setup.db',_capability=INTERNAL)
+        now=[1000.0];auth=AuthService(repo,clock=lambda:now[0])
+        self.assertEqual(auth.onboarding_status(),{'setup_required':True,'setup_authorized':False})
+        with self.assertRaises(AccessDenied):auth.authorize_setup(capability=True)
+        token=auth.authorize_setup(capability=INTERNAL)
+        now[0]+=901
+        with self.assertRaises(AuthenticationError):auth.complete_setup('first-admin',PASSWORD,token)
+        new_token=auth.authorize_setup(capability=INTERNAL)
+        with self.assertRaises(AuthenticationError):auth.complete_setup('first-admin',PASSWORD,token)
+        user_id=auth.complete_setup('first-admin',PASSWORD,new_token)
+        self.assertGreater(user_id,0)
+        self.assertEqual(auth.onboarding_status(),{'setup_required':False,'setup_authorized':False})
+        with self.assertRaises(ValueError):auth.authorize_setup(capability=INTERNAL)
+        with self.assertRaises(ValueError):auth.bootstrap('second-admin',PASSWORD,capability=INTERNAL)
+        with repo.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM users').fetchone()[0],1)
+            self.assertIsNone(db.execute('SELECT token_hash FROM setup_authorizations').fetchone()[0])
+            self.assertNotIn(token,str([tuple(row) for row in db.execute('SELECT * FROM security_events')]))
+
+    def test_concurrent_first_setup_creates_exactly_one_administrator(self):
+        from concurrent.futures import ThreadPoolExecutor
+        repo=DocumentRepository(self.root/'concurrent_setup.db',_capability=INTERNAL)
+        token=AuthService(repo).authorize_setup(capability=INTERNAL)
+        def attempt(index):
+            auth=AuthService(DocumentRepository(repo.db_path,_capability=INTERNAL))
+            try:
+                auth.complete_setup('setup-admin-'+str(index),PASSWORD,token)
+                return 'created'
+            except ValueError:return 'denied'
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            self.assertEqual(sorted(executor.map(attempt,range(2))),['created','denied'])
+        with repo.connect() as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM users WHERE role='Administrator'").fetchone()[0],1)
+
+    def test_interrupted_first_setup_rolls_back_account_and_token_consumption(self):
+        from unittest.mock import patch
+        repo=DocumentRepository(self.root/'interrupted_setup.db',_capability=INTERNAL)
+        auth=AuthService(repo);token=auth.authorize_setup(capability=INTERNAL)
+        with patch.object(auth,'event',side_effect=RuntimeError('Synthetic transaction interruption')):
+            with self.assertRaises(RuntimeError):auth.complete_setup('setup-admin',PASSWORD,token)
+        with repo.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM users').fetchone()[0],0)
+            self.assertEqual(db.execute('SELECT used FROM setup_authorizations').fetchone()[0],0)
+        auth.complete_setup('setup-admin',PASSWORD,token)
+        self.assertFalse(auth.onboarding_status()['setup_required'])
+
+    def test_pending_registration_is_unprivileged_and_duplicates_do_not_change_password(self):
+        auth=AuthService(self.repo)
+        response=auth.register('prospective-employee',PASSWORD)
+        self.assertEqual(response,auth.register('PROSPECTIVE-EMPLOYEE','Different-isolated-password!'))
+        with self.repo.connect() as db:
+            row=dict(db.execute('SELECT * FROM registration_requests').fetchone())
+            self.assertTrue(HASHER.verify(row['password_hash'],PASSWORD))
+            self.assertFalse(db.execute("SELECT 1 FROM users WHERE username='prospective-employee'").fetchone())
+        with self.assertRaises(AuthenticationError):auth.login('prospective-employee',PASSWORD)
+        with self.assertRaises(AccessDenied):AuthService(self.finance).approve_registration(row['id'],row['revision'],'Administrator',[])
+        user_id=AuthService(self.admin).approve_registration(row['id'],row['revision'],'Finance Reviewer',['Legal'])
+        token=auth.login('prospective-employee',PASSWORD)
+        principal=auth.resolve(token)
+        self.assertEqual(principal['departments'],['Finance'])
+        self.assertEqual(principal['id'],user_id)
+        with self.assertRaises(ValueError):AuthService(self.admin).approve_registration(row['id'],row['revision'],'Administrator',[])
+
+    def test_public_setup_and_registration_budgets_are_bounded(self):
+        repo=DocumentRepository(self.root/'budget_setup.db',_capability=INTERNAL)
+        auth=AuthService(repo);token=auth.authorize_setup(capability=INTERNAL)
+        for _ in range(10):
+            with self.assertRaises(AuthenticationError):auth.complete_setup('admin-budget',PASSWORD,'x'*43)
+        with self.assertRaises(AuthenticationError):auth.complete_setup('admin-budget',PASSWORD,token)
+        replacement=auth.authorize_setup(capability=INTERNAL)
+        auth.complete_setup('admin-budget',PASSWORD,replacement)
+        for _ in range(30):auth.register('budget-employee',PASSWORD)
+        with self.assertRaises(AuthenticationError):auth.register('budget-employee',PASSWORD)
+        with repo.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM registration_requests').fetchone()[0],1)
+
+    def test_local_setup_cli_writes_secret_privately_without_printing_it(self):
+        import subprocess,sys
+        path=self.root/'cli_setup.db'
+        command=[sys.executable,str(Path(__file__).resolve().parents[2]/'scripts/manage_security.py'),'--database',str(path),'authorize-setup']
+        result=subprocess.run(command,capture_output=True,text=True,timeout=30)
+        self.assertEqual(result.returncode,0,result.stderr)
+        credential=next((self.root/'.idp-setup').glob('*/setup-token.txt'))
+        token=credential.read_text(encoding='utf-8').strip()
+        self.assertGreater(len(token),32)
+        self.assertNotIn(token,result.stdout+result.stderr)
+        repo=DocumentRepository(path,_capability=INTERNAL)
+        AuthService(repo).complete_setup('cli-authorized-admin',PASSWORD,token)
+        denied=subprocess.run(command,capture_output=True,text=True,timeout=30)
+        self.assertNotEqual(denied.returncode,0)
+        self.assertEqual(len(list((self.root/'.idp-setup').glob('*/setup-token.txt'))),1)
+
+    def test_onboarding_migration_preserves_existing_users_and_history(self):
+        path=self.root/'pre_onboarding.db'
+        with self.repo.connect() as source:
+            with closing(sqlite3.connect(path)) as destination:source.backup(destination)
+        with closing(sqlite3.connect(path)) as db:
+            db.execute('DROP TABLE registration_requests')
+            db.execute('DROP TABLE setup_authorizations')
+            tables=('users','auth_sessions','documents','processing_runs','review_events','processing_versions','policy_versions')
+            before={table:db.execute('SELECT * FROM '+table).fetchall() for table in tables}
+            db.commit()
+        migrated=DocumentRepository(path,_capability=INTERNAL)
+        DocumentRepository(path,_capability=INTERNAL)
+        with migrated.connect() as db:
+            for table,records in before.items():self.assertEqual([tuple(row) for row in db.execute('SELECT * FROM '+table)],records,table)
+            self.assertEqual(db.execute('SELECT count(*) FROM registration_requests').fetchone()[0],0)
+            self.assertFalse(db.execute('PRAGMA foreign_key_check').fetchall())
+        self.assertFalse(AuthService(migrated).onboarding_status()['setup_required'])
+        self.assertEqual(len(list(self.root.glob('pre_onboarding.db.before_onboarding_v1.*.db'))),1)
 
 
 if __name__=='__main__': unittest.main()

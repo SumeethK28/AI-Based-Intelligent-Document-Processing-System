@@ -21,6 +21,22 @@ class StorageTests(unittest.TestCase):
     def save(self):
         return self.repository.save_processed_document(self.document, self.document.name, self.state)
 
+    def test_absent_install_creates_schema_without_accounts_documents_or_results(self):
+        from idp.security.auth import AuthService
+        from idp.policy.schema import DEFAULT
+        import json
+        path=self.root/'fresh'/'organization.db'
+        self.assertFalse(path.exists())
+        for _ in range(2):
+            repo=DocumentRepository(path,_capability=INTERNAL)
+            self.assertTrue(AuthService(repo).onboarding_status()['setup_required'])
+            with repo.connect() as db:
+                for table in ('users','auth_sessions','documents','processing_runs','processing_versions','review_cases','review_events','batch_jobs','batch_items','registration_requests','security_events'):
+                    self.assertEqual(db.execute('SELECT count(*) FROM '+table).fetchone()[0],0,table)
+                self.assertEqual(json.loads(db.execute('SELECT config FROM policy_versions').fetchone()[0]),DEFAULT)
+                self.assertEqual(db.execute('SELECT count(*) FROM policy_versions').fetchone()[0],1)
+        self.assertFalse((self.root/'results').exists())
+
     def test_save_reopen_and_duplicate(self):
         saved = self.save()
         reopened = DocumentRepository(self.root / "test.db", _capability=INTERNAL)

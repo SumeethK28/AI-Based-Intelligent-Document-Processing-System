@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import closing
+from contextlib import closing, contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
@@ -67,6 +67,230 @@ class BatchTests(unittest.TestCase):
     def run_job(self,job,**kwargs):
         return self.service.run(lambda:self.pipeline,job,**kwargs)
 
+    def test_submission_database_unavailable_after_one_or_several_files(self):
+        for count in (1, 3):
+            with self.subTest(count=count), tempfile.TemporaryDirectory(dir=self.root) as folder:
+                repo=DocumentRepository(Path(folder)/'isolated.db',_capability=INTERNAL)
+                service=BatchService(repo);connect=repo._connect
+                error=sqlite3.OperationalError('Synthetic database failure')
+                @contextmanager
+                def unavailable():
+                    if len(list(service.root.iterdir()))>=count: raise error
+                    with connect() as db: yield db
+                with patch.object(repo,'_connect',unavailable), self.assertRaises(sqlite3.OperationalError) as raised:
+                    service.submit([(f'{i}.pdf',pdf(str(i))) for i in range(count)],request_key='failure')
+                self.assertIs(raised.exception,error)
+                self.assertEqual(list(service.root.iterdir()),[])
+                with connect() as db:
+                    self.assertEqual(db.execute('SELECT count(*) FROM batch_jobs').fetchone()[0],0)
+
+    def test_submission_item_failure_rolls_back_rows_and_all_new_sources(self):
+        with self.repo.connect() as db:
+            db.execute("""CREATE TRIGGER reject_second_item BEFORE INSERT ON batch_items
+                WHEN NEW.filename='second.pdf' BEGIN SELECT RAISE(ABORT,'Synthetic item failure'); END""")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.service.submit([(name,pdf(name)) for name in ('first.pdf','second.pdf','third.pdf')],request_key='item-failure')
+        self.assertEqual(list(self.service.root.iterdir()),[])
+        with self.repo.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM batch_jobs').fetchone()[0],0)
+            self.assertEqual(db.execute('SELECT count(*) FROM batch_items').fetchone()[0],0)
+
+    def test_submission_permission_revoked_before_insert_cleans_only_new_sources(self):
+        from idp.security.auth import AccessDenied
+        intake=self.repo.access.intake
+        unrelated=self.service.root/'unrelated.txt';unrelated.write_text('Preserve unrelated file')
+        error=AccessDenied('Synthetic revoked permission')
+        def revoked(*args,**kwargs):
+            if any(path.suffix=='.pdf' for path in self.service.root.iterdir()): raise error
+            return intake(*args,**kwargs)
+        with patch.object(self.repo.access,'intake',side_effect=revoked), self.assertRaises(AccessDenied) as raised:
+            self.submit('receipt')
+        self.assertIs(raised.exception,error)
+        self.assertEqual(list(self.service.root.iterdir()),[unrelated])
+        self.assertEqual(unrelated.read_text(),'Preserve unrelated file')
+        with self.repo.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM batch_jobs').fetchone()[0],0)
+
+    def test_submission_partial_write_short_write_flush_and_fsync_failures(self):
+        original_open=Path.open
+        original_fsync=__import__('os').fsync
+        class Writer:
+            def __init__(self,stream,mode): self.stream,self.mode=stream,mode
+            def __enter__(self): return self
+            def __exit__(self,*args): return self.stream.__exit__(*args)
+            def fileno(self): return self.stream.fileno()
+            def write(self,data):
+                if self.mode in {'write','short'}:
+                    self.stream.write(data[:8])
+                    if self.mode=='write': raise OSError('Synthetic partial write')
+                    return 8
+                return self.stream.write(data)
+            def flush(self):
+                if self.mode=='flush': raise PermissionError('Synthetic flush failure')
+                return self.stream.flush()
+        for mode in ('write','short','flush','fsync'):
+            with self.subTest(mode=mode):
+                def opening(path,file_mode='r',*args,**kwargs):
+                    stream=original_open(path,file_mode,*args,**kwargs)
+                    return Writer(stream,mode) if file_mode=='xb' and path.parent==self.service.root else stream
+                with patch.object(Path,'open',opening), patch('idp.batch.service.os.fsync',side_effect=OSError('Synthetic sync failure') if mode=='fsync' else original_fsync):
+                    with self.assertRaises(OSError):
+                        self.service.submit([('partial.pdf',pdf('partial'))],request_key=mode)
+                self.assertEqual(list(self.service.root.iterdir()),[])
+        with self.repo.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM batch_jobs').fetchone()[0],0)
+
+    def test_submission_open_permission_and_exclusive_collision_preserve_other_files(self):
+        unrelated=self.service.root/'unrelated.pdf';unrelated.write_bytes(b'unrelated original')
+        original_open=Path.open
+        def denied(path,mode='r',*args,**kwargs):
+            if mode=='xb': raise PermissionError('Synthetic permission failure')
+            return original_open(path,mode,*args,**kwargs)
+        with patch.object(Path,'open',denied), self.assertRaises(PermissionError):
+            self.submit('receipt')
+        self.assertEqual(unrelated.read_bytes(),b'unrelated original')
+        collision=self.service.root/'collision.pdf';collision.write_bytes(b'existing retained original')
+        with patch('idp.batch.service.uuid.uuid4',return_value=SimpleNamespace(hex='collision')), self.assertRaises(FileExistsError):
+            self.submit('receipt')
+        self.assertEqual(collision.read_bytes(),b'existing retained original')
+        self.assertEqual(set(self.service.root.iterdir()),{unrelated,collision})
+
+    def test_submission_mixed_reuse_rollback_and_success_preserve_originals(self):
+        job=self.submit('receipt',key='original');self.run_job(job)
+        original=self.service.source(self.service.items(job)[0]);content=original.read_bytes()
+        unrelated=self.service.root/'unrelated.txt';unrelated.write_text('Keep this original')
+        files=[('reused.pdf',content),('fresh.pdf',pdf('po'))]
+        with self.repo.connect() as db:
+            db.execute("""CREATE TRIGGER fail_fresh BEFORE INSERT ON batch_items
+                WHEN NEW.filename='fresh.pdf' BEGIN SELECT RAISE(ABORT,'Synthetic failure'); END""")
+        with self.assertRaises(sqlite3.IntegrityError): self.service.submit(files,request_key='mixed')
+        self.assertEqual(set(self.service.root.iterdir()),{original,unrelated})
+        self.assertEqual(original.read_bytes(),content)
+        self.assertEqual(unrelated.read_text(),'Keep this original')
+        self.assertEqual(len(self.service.items(job)),1)
+        with self.repo.connect() as db: db.execute('DROP TRIGGER fail_fresh')
+        successful=self.service.submit(files,request_key='mixed')
+        items=self.service.items(successful)
+        self.assertEqual(items[0]['source_path'],str(original))
+        self.assertNotEqual(items[1]['source_path'],str(original))
+        for item in items:
+            self.assertEqual(self.repo.calculate_hash(self.service.source(item)),item['file_hash'])
+        self.assertEqual(len(list(self.service.root.iterdir())),3)
+
+    def test_submission_concurrent_idempotency_keeps_only_committed_sources(self):
+        import threading,os
+        barrier=threading.Barrier(2);fsync=os.fsync;content=pdf('receipt')
+        def synchronized(fd):
+            fsync(fd);barrier.wait(timeout=15)
+        def submit(_):
+            repo=DocumentRepository(self.repo.db_path,_capability=INTERNAL)
+            return BatchService(repo).submit([('receipt.pdf',content)],request_key='concurrent')
+        with patch('idp.batch.service.os.fsync',side_effect=synchronized), ThreadPoolExecutor(max_workers=2) as executor:
+            jobs=list(executor.map(submit,range(2)))
+        self.assertEqual(jobs[0],jobs[1])
+        self.assertEqual(len(list(self.service.root.iterdir())),1)
+        self.assertEqual(self.service.source(self.service.items(jobs[0])[0]).read_bytes(),content)
+        with patch.object(Path,'open',side_effect=AssertionError('Duplicate must not write another source')):
+            self.assertEqual(self.service.submit([('repeat.pdf',content)],request_key='concurrent'),jobs[0])
+        with self.repo.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM batch_jobs').fetchone()[0],1)
+            self.assertEqual(db.execute('SELECT count(*) FROM batch_items').fetchone()[0],1)
+
+    def test_submission_cleanup_failure_does_not_mask_original_or_expose_paths(self):
+        connect=self.repo._connect;unlink=Path.unlink
+        error=sqlite3.OperationalError('PRIVATE database failure')
+        @contextmanager
+        def unavailable():
+            if list(self.service.root.iterdir()): raise error
+            with connect() as db: yield db
+        def denied(path,*args,**kwargs):
+            if path.parent==self.service.root: raise PermissionError('PRIVATE '+str(path))
+            return unlink(path,*args,**kwargs)
+        with self.assertLogs('idp.batch.service',level='WARNING') as logs:
+            with patch.object(self.repo,'_connect',unavailable), patch.object(Path,'unlink',denied):
+                with self.assertRaises(sqlite3.OperationalError) as raised: self.submit('receipt')
+        self.assertIs(raised.exception,error)
+        self.assertEqual(len(list(self.service.root.iterdir())),1)
+        self.assertNotIn('PRIVATE',' '.join(logs.output))
+        self.assertNotIn(str(self.root),' '.join(logs.output))
+
+    def test_submission_error_after_commit_preserves_referenced_sources(self):
+        connect=self.repo._connect;injected=False
+        error=sqlite3.OperationalError('Synthetic post-commit teardown failure')
+        @contextmanager
+        def post_commit():
+            nonlocal injected
+            wrote=[]
+            with connect() as db:
+                db.set_trace_callback(lambda sql:wrote.append(True) if sql.startswith('INSERT INTO batch_items') else None)
+                yield db
+            if wrote and not injected:
+                injected=True;raise error
+        files=[('first.pdf',pdf('first')),('second.pdf',pdf('second'))]
+        with patch.object(self.repo,'_connect',post_commit), self.assertRaises(sqlite3.OperationalError) as raised:
+            self.service.submit(files,request_key='committed')
+        self.assertIs(raised.exception,error)
+        job=self.service.history()[0]['id']
+        self.assertEqual(len(self.service.items(job)),2)
+        for item in self.service.items(job): self.assertTrue(self.service.source(item).exists())
+        self.assertEqual(self.service.submit(files,request_key='committed'),job)
+        self.assertEqual(len(list(self.service.root.iterdir())),2)
+
+    def test_submission_uncertain_commit_retains_files_if_reference_check_fails(self):
+        for outcome in ('commit','rollback'):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory(dir=self.root) as folder:
+                repo=DocumentRepository(Path(folder)/'uncertain.db',_capability=INTERNAL)
+                service=BatchService(repo);connect=repo._connect;failed=False
+                error=sqlite3.OperationalError('PRIVATE uncertain transaction')
+                @contextmanager
+                def uncertain():
+                    nonlocal failed
+                    if failed: raise sqlite3.OperationalError('PRIVATE cannot verify references')
+                    wrote=[]
+                    with connect() as db:
+                        db.set_trace_callback(lambda sql:wrote.append(True) if sql.startswith('INSERT INTO batch_items') else None)
+                        yield db
+                        if wrote and outcome=='rollback':
+                            failed=True;raise error
+                    if wrote and outcome=='commit':
+                        failed=True;raise error
+                with self.assertLogs('idp.batch.service',level='WARNING') as logs:
+                    with patch.object(repo,'_connect',uncertain), self.assertRaises(sqlite3.OperationalError) as raised:
+                        service.submit([('one.pdf',pdf('one')),('two.pdf',pdf('two'))],request_key='uncertain')
+                self.assertIs(raised.exception,error)
+                self.assertEqual(len(list(service.root.iterdir())),2)
+                with connect() as db:
+                    self.assertEqual(db.execute('SELECT count(*) FROM batch_jobs').fetchone()[0],int(outcome=='commit'))
+                self.assertNotIn('PRIVATE',' '.join(logs.output))
+                self.assertNotIn(folder,' '.join(logs.output))
+
+    def test_submission_deferred_commit_failure_rolls_back_and_cleans_sources(self):
+        with self.repo.connect() as db:
+            db.execute('CREATE TABLE commit_guard(batch_id TEXT REFERENCES batch_jobs(id) DEFERRABLE INITIALLY DEFERRED)')
+            db.execute("""CREATE TRIGGER fail_commit AFTER INSERT ON batch_items
+                BEGIN INSERT INTO commit_guard VALUES('missing-parent'); END""")
+        with self.assertRaises(sqlite3.IntegrityError): self.submit('receipt','po')
+        self.assertEqual(list(self.service.root.iterdir()),[])
+        with self.repo.connect() as db:
+            for table in ('batch_jobs','batch_items','commit_guard'):
+                self.assertEqual(db.execute('SELECT count(*) FROM '+table).fetchone()[0],0)
+
+    def test_submission_cleanup_never_deletes_a_replaced_file(self):
+        connect=self.repo._connect;replaced=[]
+        @contextmanager
+        def replacement():
+            sources=list(self.service.root.iterdir())
+            if sources and not replaced:
+                path=sources[0];moved=self.service.root/'moved-owned.pdf'
+                path.rename(moved);path.write_bytes(b'unrelated replacement')
+                replaced.extend([path,moved])
+                raise PermissionError('Synthetic late permission change')
+            with connect() as db: yield db
+        with self.assertLogs('idp.batch.service',level='WARNING'):
+            with patch.object(self.repo,'_connect',replacement), self.assertRaises(PermissionError): self.submit('receipt')
+        self.assertEqual(replaced[0].read_bytes(),b'unrelated replacement')
+        self.assertTrue(replaced[1].exists())
+
     def test_mixed_batch_both_po_orders(self):
         for order in [('invoice','po'),('po','invoice')]:
             with self.subTest(order=order):
@@ -99,7 +323,23 @@ class BatchTests(unittest.TestCase):
         self.assertTrue(rows[0]['duplicate'])
         self.run_job(second)
         self.assertEqual(self.llm.calls,calls)
+        self.assertEqual(self.service.items(second)[0]['source_path'],self.service.items(job)[1]['source_path'])
         self.assertEqual(self.service.summary(job)['financial_totals'],[])
+        self.assertEqual(len(self.repo.list_documents()),1)
+
+    def test_source_reuse_verifies_content_and_keeps_original_records(self):
+        content=pdf('receipt')
+        first=self.service.submit([('original.pdf',content)],request_key='original-source')
+        self.run_job(first)
+        original=self.service.items(first)[0]
+        second=self.service.submit([('renamed.pdf',content)],request_key='reused-source')
+        self.assertEqual(self.service.items(second)[0]['source_path'],original['source_path'])
+        self.assertEqual(len(list(self.service.root.iterdir())),1)
+        Path(original['source_path']).write_bytes(b'corrupted isolated fixture')
+        third=self.service.submit([('fresh.pdf',content)],request_key='fresh-source')
+        replacement=self.service.items(third)[0]
+        self.assertNotEqual(replacement['source_path'],original['source_path'])
+        self.assertEqual(self.service.source(replacement).read_bytes(),content)
         self.assertEqual(len(self.repo.list_documents()),1)
 
     def test_failure_isolated_and_retry_history(self):

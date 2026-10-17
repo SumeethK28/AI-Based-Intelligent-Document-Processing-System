@@ -140,18 +140,20 @@ export function Select({
   value,
   set,
   options,
+  labels,
 }: {
   label: string;
   value: string;
   set: (v: string) => void;
   options: string[];
+  labels?: Record<string,string>;
 }) {
   return (
     <Field label={label}>
       <select value={value} onChange={(e) => set(e.target.value)}>
         {options.map((v) => (
           <option key={v} value={v}>
-            {v ? words(v) : "All"}
+            {labels?.[v] ?? (v ? words(v) : "All")}
           </option>
         ))}
       </select>

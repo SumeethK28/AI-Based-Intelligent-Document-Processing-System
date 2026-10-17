@@ -37,7 +37,7 @@ class DownloadService:
         elif kind=='document_json': repo.access.document(resource.get('document_id'),'export')
         elif kind=='analytics_json': repo.require('analytics_export')
         elif kind in {'filtered_json','filtered_csv'}: repo.require('export')
-        elif kind in {'batch_json','batch_csv'}: repo.require('batches'); repo.require('export')
+        elif kind in {'batch_json','batch_csv'}: repo.access.batch(resource.get('batch_id')); repo.require('export')
         else: raise AccessDenied('Unsupported download operation.')
 
     def redeem(self,token):

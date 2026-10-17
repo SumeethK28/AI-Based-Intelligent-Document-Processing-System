@@ -1,42 +1,43 @@
 import { useState } from "react";
 
 import { ArrowLeft, Search } from "lucide-react";
-import { Session } from "./api";
+import { Session, RecordData } from "./api";
 
 import {
   useLoad,
   Button,
-  TextField,
   Select,
   Confirm,
   Panel,
   State,
   Table,
+  Badge,
+  Detail,
+  words,
   Subtabs,
   PageTitle,
 } from "./components";
 import { DocumentDetail } from "./Documents";
 
 export function MyWork({ session }: { session: Session }) {
-  const [view, setView] = useState("Review queue"),
+  const [view, setView] = useState("My department"),
     [id, setId] = useState<number>(),
     [search, setSearch] = useState(""),
     [team, setTeam] = useState(""),
     [risk, setRisk] = useState(""),
     [caseStatus, setCaseStatus] = useState(""),
     [closed, setClosed] = useState(false),
-    [page, setPage] = useState(1),
-    [owner, setOwner] = useState("");
+    [page, setPage] = useState(1);
   const { data, error } = useLoad(
     "/review?" +
       new URLSearchParams({
         search,
-        team: view === "Department work" ? team : "",
+        team: view === "My department" ? team : "",
+        view: view === "Assigned to me" ? "mine" : view === "Unclaimed" ? "unclaimed" : view === "Related documents" ? "related" : "department",
         risk,
         case_status: caseStatus,
         include_closed: String(closed),
         page: String(page),
-        assignee: owner,
       }),
   );
   return (
@@ -51,8 +52,9 @@ export function MyWork({ session }: { session: Session }) {
         set={(v) => {
           setView(v);
           setId(undefined);
+          setPage(1);
         }}
-        items={["Review queue", "Department work"]}
+        items={["Assigned to me", "My department", "Unclaimed", "Related documents"]}
       />
       {id ? (
         <>
@@ -60,7 +62,7 @@ export function MyWork({ session }: { session: Session }) {
             <ArrowLeft size={15} />
             Back to queue
           </Button>
-          <DocumentDetail id={id} review key={id} />
+          <DocumentDetail id={id} review={view !== "Related documents"} key={id} />
         </>
       ) : (
         <>
@@ -76,8 +78,8 @@ export function MyWork({ session }: { session: Session }) {
               aria-label="Search review queue"
             />
           </label>
-          <div className="form-grid">
-            {view === "Department work" && (
+          {view !== "Related documents" && <div className="form-grid">
+            {view === "My department" && (
               <Select
                 label="Department"
                 value={team}
@@ -106,30 +108,16 @@ export function MyWork({ session }: { session: Session }) {
                 "rejected",
               ]}
             />
-            <TextField
-              label="Assigned reviewer identity"
-              value={owner}
-              set={setOwner}
-            />
-          </div>
-          <Confirm value={closed} set={setClosed}>
+          </div>}
+          {view !== "Related documents" && <Confirm value={closed} set={setClosed}>
             Include approved and rejected cases
-          </Confirm>
-          <Panel title={data ? `${data.total} cases` : "Your queue"}>
+          </Confirm>}
+          {view === "Related documents" && <p className="notice">Authorized references from other departments. Viewing these records does not grant review or approval permission.</p>}
+          <Panel title={data ? `${data.total} ${view === "Related documents" ? "related documents" : "cases"}` : "Your queue"}>
+            {data?.total === 0 && <p className="empty">No cases in this view. You are assigned to {session.departments.join(", ")}. Work appears here when routed, assigned or claimed; other organizational records may still exist.</p>}
             <State error={error} loading={!data && !error} />
             {data && (
-              <Table
-                rows={data.rows}
-                onOpen={setId}
-                keys={[
-                  "filename",
-                  "team",
-                  "case_status",
-                  "risk",
-                  "priority",
-                  "assignee",
-                ]}
-              />
+              <CaseList rows={data.rows} onOpen={setId} related={view === "Related documents"} />
             )}
           </Panel>
           <div className="pagination">
@@ -148,4 +136,35 @@ export function MyWork({ session }: { session: Session }) {
       )}
     </>
   );
+}
+
+
+const reviewerName = (value: unknown) => {
+  const name=String(value ?? "");
+  return name.startsWith("user:") ? name.split(":").slice(2).join(":") : name || "Unclaimed";
+};
+
+export function CaseList({ rows, onOpen, related }: { rows: RecordData[]; onOpen: (id: number) => void; related: boolean }) {
+  if (!rows.length) return null;
+  return <div className="case-list">
+    <div className="case-table">
+      <Table rows={rows} onOpen={onOpen} cells={{assignee: (row) => reviewerName(row.assignee)}} keys={related ? ["filename", "team", "case_status", "assignee", "updated_at"] : ["filename", "team", "case_status", "risk", "priority", "assignee"]} />
+    </div>
+    <div className="case-cards" aria-label={related ? "Related document cards" : "Department case cards"}>
+      {rows.map((row) => <article className="case-card" key={row.id}>
+        <h3 className="case-card-filename" title={row.filename}>{row.filename}</h3>
+        <p className="footnote">{words(row.document_type)} · {related ? "Read-only reference" : "Department case"}</p>
+        <dl className="case-card-fields">
+          <div><dt>Department</dt><dd>{row.team ?? "Not recorded"}</dd></div>
+          <div><dt>Status</dt><dd><Badge value={row.case_status ?? row.workflow_status} /></dd></div>
+          {row.risk != null && <div><dt>Risk</dt><dd><Badge value={row.risk} /></dd></div>}
+          {row.priority != null && <div><dt>Priority</dt><dd>{words(row.priority)}</dd></div>}
+          <div><dt>Assigned reviewer</dt><dd>{reviewerName(row.assignee)}</dd></div>
+          {row.updated_at && <div><dt>Last updated</dt><dd>{row.updated_at}</dd></div>}
+        </dl>
+        <Detail title="Full filename"><p className="case-full-filename">{row.filename}</p></Detail>
+        <Button onClick={() => onOpen(row.id)} aria-label={"Open " + row.filename}>Open document</Button>
+      </article>)}
+    </div>
+  </div>;
 }

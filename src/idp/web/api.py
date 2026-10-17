@@ -7,6 +7,7 @@ from datetime import date
 from urllib.parse import quote
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
@@ -33,6 +34,17 @@ class Login(Input):
     password: str = Field(max_length=128)
 
 
+class FirstSetup(Login):
+    setup_token: str = Field(min_length=32,max_length=128)
+
+
+class RegistrationApproval(Input):
+    expected_revision: int = Field(ge=0)
+    role: str
+    departments: list[str]
+    confirmed: Literal[True]
+
+
 class Mutation(Input):
     expected_revision: int = Field(ge=0)
     reason: str = Field(min_length=1)
@@ -54,7 +66,7 @@ class SaveCorrection(Correction, Mutation):
 
 
 class Management(Mutation):
-    action: Literal['claim', 'assign', 'status', 'priority']
+    action: Literal['claim', 'assign', 'handoff', 'status', 'priority']
     team: str | None = None
     assignee: str | None = None
     status: str | None = None
@@ -91,6 +103,12 @@ class UserUpdate(Input):
     active: bool
     role: str
     departments: list[str]
+    confirmed: Literal[True]
+
+
+class CredentialReset(Input):
+    expected_revision: int
+    new_password: str = Field(min_length=12,max_length=128)
     confirmed: Literal[True]
 
 
@@ -143,6 +161,11 @@ def create_app(database_path=None, *, pipeline_factory=None, frontend=None):
             'Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'"})
         return response
 
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(request, error):
+        # Validation details can echo passwords, setup credentials or document data.
+        return JSONResponse({'detail':'Invalid request fields. Check the required values and try again.'},status_code=422)
+
     @app.exception_handler(AccessDenied)
     async def denied(request, error):
         return JSONResponse({'detail':str(error)},status_code=403)
@@ -183,6 +206,23 @@ def create_app(database_path=None, *, pipeline_factory=None, frontend=None):
         from idp.pipeline.agentic_pipeline import AgenticDocumentPipeline
         return AgenticDocumentPipeline(repo.db_path,session_token=repo.session_token)
 
+    @app.get('/api/onboarding')
+    def onboarding():
+        return AuthService(DocumentRepository(app.state.database_path)).onboarding_status()
+
+    @app.post('/api/setup')
+    def first_setup(body:FirstSetup):
+        AuthService(DocumentRepository(app.state.database_path)).complete_setup(body.username,body.password,body.setup_token)
+        return {'ok':True,'message':'Organization setup completed. Sign in with your administrator account.'}
+
+    @app.post('/api/registrations')
+    def register(body:Login):
+        return AuthService(DocumentRepository(app.state.database_path)).register(body.username,body.password)
+
+    @app.post('/api/registrations/{request_id}/approve')
+    def approve(request_id:int,body:RegistrationApproval,repo:Repo):
+        return {'id':AuthService(repo).approve_registration(request_id,body.expected_revision,body.role,body.departments)}
+
     @app.post('/api/login')
     def login(body: Login, response: Response):
         token = AuthService(DocumentRepository(app.state.database_path)).login(body.username,body.password)
@@ -202,7 +242,10 @@ def create_app(database_path=None, *, pipeline_factory=None, frontend=None):
 
     @app.get('/api/overview')
     def overview(request: Request, repo: Repo):
-        return OperationsQueries(repo).overview(filters_for(request))
+        result=OperationsQueries(repo).overview(filters_for(request))
+        if 'review' in PERMISSIONS.get(repo.require('account')['role'],set()):
+            result['employee_work']=ReviewService(repo).work_summary(filters_for(request))
+        return result
 
     @app.get('/api/documents')
     def documents(request: Request, repo: Repo, search: str='', document_type: str='', department: str='', status: str='',
@@ -230,13 +273,16 @@ def create_app(database_path=None, *, pipeline_factory=None, frontend=None):
         fields=result['full_result'].get('extracted_fields',{})
         editable=sorted((set(fields)|set(ValidationAgent.REQUIRED_FIELDS.get(kind,[]))|set(ValidationAgent.OPTIONAL_FIELDS.get(kind,[])))&EDITABLE)
         return {**result,'case':ReviewService(repo).case(document_id),'events':ReviewService(repo).history(document_id),
-                'sources':sources,'versions':versions,'runs':runs,'editable_fields':{key:fields.get(key) for key in editable}}
+                'collaboration':ReviewService(repo).collaboration(document_id),'sources':sources,'versions':versions,'runs':runs,'editable_fields':{key:fields.get(key) for key in editable}}
 
     @app.get('/api/review')
     def queue(request: Request, repo: Repo, search: str='', team: str='', risk: str='', case_status: str='', assignee: str='',
-              include_closed: bool=False, page: int=1):
+              include_closed: bool=False, page: int=1,view: str='department'):
+        if view=='related':
+            rows,total=ReviewService(repo).related_work(filters_for(request),page=page)
+            return {'rows':rows,'total':total,'read_only':True}
         rows,total=ReviewService(repo).queue(filters_for(request),team=team,risk=risk,case_status=case_status,
-            assignee=assignee,include_closed=include_closed,page=max(1,page))
+            assignee=assignee,include_closed=include_closed,page=max(1,page),view=view)
         return {'rows':rows,'total':total}
 
     @app.post('/api/documents/{document_id}/decision')
@@ -291,7 +337,7 @@ def create_app(database_path=None, *, pipeline_factory=None, frontend=None):
 
     @app.post('/api/uploads/{mode}')
     async def upload(mode: Literal['single','batch','preview'], request: Request, repo: Repo):
-        repo.require('process' if mode=='single' else 'batches')
+        repo.access.intake()
         from idp.batch.ingestion import preview,inspect_file
         from starlette.concurrency import run_in_threadpool
         async with request.form(max_files=50,max_fields=10) as form:
@@ -324,7 +370,7 @@ def create_app(database_path=None, *, pipeline_factory=None, frontend=None):
 
     @app.post('/api/batches/{batch_id}/run')
     def run_batch(batch_id: str, body: dict, repo: Repo):
-        repo.require('batches')
+        repo.access.batch(batch_id)
         if body.get('consent') is not True: raise ValueError('External AI consent required.')
         try:
             BatchService(repo).run(lambda:pipeline(repo),batch_id,ai_consent=True)
@@ -366,8 +412,8 @@ def create_app(database_path=None, *, pipeline_factory=None, frontend=None):
 
     @app.get('/api/users')
     def users(repo:Repo):
-        from idp.security.auth import ROLES,DEPARTMENTS
-        return {'users':AuthService(repo).users(),'roles':ROLES,'departments':DEPARTMENTS}
+        from idp.security.auth import ROLES,DEPARTMENTS,REVIEW_DEPARTMENT
+        return {'users':AuthService(repo).users(),'roles':ROLES,'departments':DEPARTMENTS,'role_departments':REVIEW_DEPARTMENT,'registration_requests':AuthService(repo).registrations()}
 
     @app.post('/api/users')
     def user_create(body:UserInput,repo:Repo):
@@ -376,6 +422,11 @@ def create_app(database_path=None, *, pipeline_factory=None, frontend=None):
     @app.post('/api/users/{user_id}')
     def user_update(user_id:int,body:UserUpdate,repo:Repo):
         AuthService(repo).update_user(user_id,body.expected_revision,active=body.active,role=body.role,departments=body.departments)
+        return {'ok':True}
+
+    @app.post('/api/users/{user_id}/credentials')
+    def reset_credentials(user_id:int,body:CredentialReset,repo:Repo):
+        AuthService(repo).reset_password(user_id,body.expected_revision,body.new_password)
         return {'ok':True}
 
     @app.post('/api/password')

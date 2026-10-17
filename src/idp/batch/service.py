@@ -2,7 +2,9 @@
 import csv
 import io
 import json
+import logging
 import os
+import stat
 import time
 import uuid
 from contextlib import contextmanager
@@ -14,6 +16,7 @@ from idp.utils.exports import spreadsheet_safe
 from idp.utils.money import parse_money
 
 TERMINAL = {'completed','duplicate','failed','review_required'}
+LOGGER = logging.getLogger(__name__)
 
 
 @contextmanager
@@ -70,12 +73,14 @@ class BatchService:
             self.root.chmod(0o700)
 
     def submit(self, files, *, request_key, name='Document batch', description='', force=False):
-        self.repository.require('batches')
+        principal=self.repository.access.batch()
+        self.repository.access.intake(force=force)
         if not request_key or len(request_key) > 128:
             raise ValueError('A valid submission identifier is required.')
         with self.repository._connect() as db:
             prior = db.execute('SELECT id FROM batch_jobs WHERE request_key=?',(request_key,)).fetchone()
         if prior:
+            self.repository.access.batch(prior['id'])
             return prior['id']
         rows, accepted = preview(files, self.repository)
         if not accepted:
@@ -83,42 +88,121 @@ class BatchService:
         batch_id = uuid.uuid4().hex
         now = self.repository.timestamp()
         retained = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
-        paths = []
-        # Inputs are durable before DB submission. Names never determine storage paths.
-        for info, data in accepted:
-            path = self.root / (uuid.uuid4().hex + info['extension'])
-            with path.open('xb') as target:
-                target.write(data)
-                target.flush()
-                os.fsync(target.fileno())
-            if os.name != 'nt':
-                path.chmod(0o600)
-            paths.append((info, path))
-        with self.repository._connect() as db:
-            db.execute('BEGIN IMMEDIATE')
-            prior = db.execute('SELECT id FROM batch_jobs WHERE request_key=?',(request_key,)).fetchone()
-            if prior:
-                # Only our unreferenced fresh files; never existing retained sources.
-                for _, path in paths:
-                    path.unlink()
-                return prior['id']
-            db.execute('INSERT INTO batch_jobs(id,request_key,name,description,created_at) VALUES(?,?,?,?,?)',
-                       (batch_id,request_key,name.strip()[:200] or 'Document batch',description[:2000],now))
-            for info, path in paths:
-                db.execute('''INSERT INTO batch_items(batch_id,filename,file_hash,source_path,size_bytes,pages,force_reprocess,retain_until)
-                    VALUES(?,?,?,?,?,?,?,?)''', (batch_id,info['filename'],info['file_hash'],str(path),info['size_bytes'],info['pages'],int(force),retained))
+        paths, created = [], []
+        references_possible = False
+        duplicate = False
+        try:
+            # Inputs are durable before DB submission. Names never determine storage paths.
+            for info, data in accepted:
+                # Reuse only retained, hash-verified sources already linked to a
+                # document this principal may read. Never trust filenames or paths.
+                with self.repository._connect() as db:
+                    candidates = [dict(row) for row in db.execute(
+                        'SELECT * FROM batch_items WHERE file_hash=? AND document_id IS NOT NULL ORDER BY id DESC LIMIT 10',
+                        (info['file_hash'],))]
+                reusable = None
+                for candidate in candidates:
+                    try:
+                        reusable = self.source(candidate)
+                        break
+                    except (PermissionError, ValueError, FileNotFoundError):
+                        continue
+                if reusable is not None:
+                    paths.append((info, reusable))
+                    continue
+                path = self.root / (uuid.uuid4().hex + info['extension'])
+                with path.open('xb') as target:
+                    # Record ownership before writing, including partial-write failures.
+                    owned = {'path': path, 'identity': None}
+                    created.append(owned)
+                    identity = os.fstat(target.fileno())
+                    owned['identity'] = (identity.st_dev, identity.st_ino)
+                    if target.write(data) != len(data):
+                        raise OSError('Incomplete batch source write.')
+                    target.flush()
+                    os.fsync(target.fileno())
+                if os.name != 'nt':
+                    path.chmod(0o600)
+                paths.append((info, path))
+            with self.repository._connect() as db:
+                db.execute('BEGIN IMMEDIATE')
+                principal=self.repository.access.intake(force=force)
+                prior = db.execute('SELECT id FROM batch_jobs WHERE request_key=?',(request_key,)).fetchone()
+                if prior:
+                    self.repository.access.batch(prior['id'])
+                    batch_id, duplicate = prior['id'], True
+                else:
+                    db.execute('INSERT INTO batch_jobs(id,request_key,name,description,created_at) VALUES(?,?,?,?,?)',
+                               (batch_id,request_key,name.strip()[:200] or 'Document batch',description[:2000],now))
+                    context=None if self.repository.internal else json.dumps({key:principal[key] for key in ('id','username','role','departments')})
+                    db.execute('UPDATE batch_jobs SET submitted_by=?,actor_context=? WHERE id=?',(principal['id'],context,batch_id))
+                    for info, path in paths:
+                        # After an INSERT attempt, an exception may come from commit
+                        # or connection teardown. Do not infer rollback from the error.
+                        references_possible = True
+                        db.execute('''INSERT INTO batch_items(batch_id,filename,file_hash,source_path,size_bytes,pages,force_reprocess,retain_until)
+                            VALUES(?,?,?,?,?,?,?,?)''', (batch_id,info['filename'],info['file_hash'],str(path),info['size_bytes'],info['pages'],int(force),retained))
+        except BaseException:
+            self._cleanup_submission_sources(created, check_references=references_possible)
+            raise
+        if duplicate:
+            self._cleanup_submission_sources(created, check_references=True)
         return batch_id
 
+    def _cleanup_submission_sources(self, created, *, check_references):
+        """Discard only owned, unreferenced files; uncertain storage stays intact."""
+        if not created:
+            return
+
+        def diagnostic(message):
+            try:
+                LOGGER.warning(message)
+            except Exception:
+                pass  # A diagnostic failure must not replace the submission error.
+
+        def discard(db=None):
+            for owned in created:
+                path = owned['path']
+                try:
+                    if db is not None and db.execute('SELECT 1 FROM batch_items WHERE source_path=? LIMIT 1', (str(path),)).fetchone():
+                        continue
+                    identity = path.lstat()
+                    if (self.root.is_symlink() or path.parent != self.root
+                            or path.resolve().parent != self.root or not stat.S_ISREG(identity.st_mode)
+                            or owned['identity'] != (identity.st_dev, identity.st_ino)):
+                        diagnostic('Batch source cleanup skipped: file ownership could not be verified.')
+                        continue
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+                except Exception:
+                    diagnostic('Batch source cleanup incomplete; operator inspection is required.')
+
+        if not check_references:
+            # No item INSERT was attempted; these exclusive-create names were
+            # never published for another submission to reuse.
+            discard()
+            return
+        try:
+            with self.repository._connect() as db:
+                # Serialize reference checks and unlinking with other writers.
+                db.execute('BEGIN IMMEDIATE')
+                discard(db)
+        except Exception:
+            diagnostic('Batch source cleanup deferred: database references could not be verified.')
+
     def history(self):
-        self.repository.require('batches')
+        principal=self.repository.access.batch()
+        where='' if self.repository.internal or principal['role']=='Administrator' else " WHERE b.submitted_by=? AND json_extract(b.actor_context,'$.role')=?"
+        args=[] if not where else [principal['id'],principal['role']]
         with self.repository._connect() as db:
             return [dict(row) for row in db.execute('''SELECT b.*,count(i.id) AS items,
                 sum(i.state='queued') AS queued,sum(i.state='processing') AS processing,
                 sum(i.state='failed') AS failed FROM batch_jobs b JOIN batch_items i ON i.batch_id=b.id
-                GROUP BY b.id ORDER BY b.created_at DESC''')]
+                '''+where+''' GROUP BY b.id ORDER BY b.created_at DESC''',args)]
 
     def items(self, batch_id):
-        self.repository.require('batches')
+        self.repository.access.batch(batch_id)
         with self.repository._connect() as db:
             return [dict(row) for row in db.execute('SELECT * FROM batch_items WHERE batch_id=? ORDER BY id',(batch_id,))]
 
@@ -130,7 +214,7 @@ class BatchService:
             if not stored: raise FileNotFoundError('Retained source unavailable')
             item=dict(stored)  # Never trust a supplied path/document/hash.
             if item['document_id']: self.repository.access.document(item['document_id'],'source')
-            else: self.repository.require('batches')
+            else: self.repository.access.batch(item['batch_id'])
         original = Path(item['source_path'])
         path = original.resolve()
         if path.parent != self.root or original.is_symlink() or not path.is_file():
@@ -142,14 +226,18 @@ class BatchService:
         return path
 
     def attempts(self, item_id):
-        self.repository.require('batches')
+        self.repository.access.batch()
         with self.repository._connect() as db:
+            item=db.execute('SELECT batch_id FROM batch_items WHERE id=?',(item_id,)).fetchone()
+            if not item: raise ValueError('Processing item unavailable.')
+            self.repository.access.batch(item['batch_id'])
             return [dict(row) for row in db.execute('SELECT * FROM batch_attempts WHERE item_id=? ORDER BY id',(item_id,))]
 
     def retry(self, item_id):
-        self.repository.require('batches')
+        self.repository.access.batch()
         with worker_lock(self.repository.db_path), self.repository._connect() as db:
             row = db.execute('SELECT * FROM batch_items WHERE id=?',(item_id,)).fetchone()
+            if row: self.repository.access.batch(row['batch_id'])
             if not row or row['state'] != 'failed':
                 raise ValueError('Only failed items can be retried.')
             if row['attempts'] >= 5:
@@ -159,15 +247,17 @@ class BatchService:
             db.execute('UPDATE batch_jobs SET reconciled_at=NULL WHERE id=?',(row['batch_id'],))
 
     def run(self, pipeline_factory, batch_id=None, *, max_items=50, progress=None, ai_consent=False):
-        self.repository.require('batches')
+        principal=self.repository.access.batch(batch_id)
+        if not self.repository.internal and principal['role']!='Administrator' and not batch_id:
+            raise ValueError('Select your processing job explicitly.')
         if not self.repository.internal and ai_consent is not True:
             raise ValueError('Explicit consent to external Groq batch processing is required.')
         count = 0
         with worker_lock(self.repository.db_path):
             with self.repository._connect() as db:
                 # A free OS lock proves previous worker is gone; retain interrupted attempt.
-                db.execute("UPDATE batch_attempts SET state='interrupted',completed_at=? WHERE state='processing'",(self.repository.timestamp(),))
-                db.execute("UPDATE batch_items SET state='queued' WHERE state='processing'")
+                db.execute("UPDATE batch_attempts SET state='interrupted',completed_at=? WHERE state='processing'"+(' AND item_id IN (SELECT id FROM batch_items WHERE batch_id=?)' if batch_id else ''),[self.repository.timestamp(),*([batch_id] if batch_id else [])])
+                db.execute("UPDATE batch_items SET state='queued' WHERE state='processing'"+(' AND batch_id=?' if batch_id else ''),[batch_id] if batch_id else [])
             pipeline = None
             while count < max_items:
                 with self.repository._connect() as db:
@@ -214,7 +304,11 @@ class BatchService:
 
     def reconcile(self, batch_id):
         """Deterministic post-batch PO recheck: no OCR/model call, no new run."""
-        self.repository.require('batches')
+        principal=self.repository.access.batch(batch_id)
+        if not self.repository.internal and principal['role']!='Administrator':
+            from idp.security import INTERNAL
+            from idp.storage.repository import DocumentRepository
+            return BatchService(DocumentRepository(self.repository.db_path,_capability=INTERNAL)).reconcile(batch_id)
         items = self.items(batch_id)
         if any(item['state'] not in TERMINAL for item in items):
             return

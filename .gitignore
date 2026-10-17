@@ -137,3 +137,6 @@ desktop.ini
 node_modules/
 /frontend/dist/
 *.tsbuildinfo
+
+# Local-only first-install authorization credentials
+**/.idp-setup/

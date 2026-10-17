@@ -24,12 +24,18 @@ class AgenticDocumentPipeline:
 
     def __init__(self, database_path="data/idp.db", *, baseline=None, llm=None, session_token=None, _capability=None):
         self.repository = DocumentRepository(database_path, session_token=session_token, _capability=_capability)
-        self.repository.require('process')
+        self.repository.access.intake()
         self.baseline = baseline if baseline is not None else DocumentPipeline(
             ocr_engine=RapidOCREngine()
         )
 
-        self.graph = build_agent_graph(repository=self.repository, llm=llm)
+        # Deterministic matching/policy need organizational references. Writes and
+        # returned duplicate data remain guarded by the employee repository.
+        checks=self.repository
+        if not self.repository.internal:
+            from idp.security import INTERNAL
+            checks=DocumentRepository(database_path,_capability=INTERNAL)
+        self.graph = build_agent_graph(repository=checks, llm=llm)
 
     def process(
         self,
@@ -41,7 +47,7 @@ class AgenticDocumentPipeline:
     ) -> dict[str, Any]:
 
         path = Path(file_path)
-        principal = self.repository.require('process')
+        principal = self.repository.access.intake(force=force_reprocess)
         if not self.repository.internal:
             if ai_consent is not True:
                 raise ValueError('Explicit consent to external Groq processing is required.')

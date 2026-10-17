@@ -178,11 +178,11 @@ class ReviewTests(unittest.TestCase):
 
     def test_department_queues_show_po_exceptions_and_real_age(self):
         invoice=self.create('invoice',{'invoice_number':'I-1','issue_date':'2026-10-01','seller':'Acme','client':'Buyer','total':'INR 20.00','po_reference':'NO-PO'})
-        for team in ('Finance','Procurement'):
-            rows,total=self.service.queue(team=team)
-            self.assertEqual(total,1)
-            self.assertEqual(rows[0]['id'],invoice)
-            self.assertGreaterEqual(rows[0]['age_days'],0)
+        rows,total=self.service.queue(team='Finance')
+        self.assertEqual(total,1)
+        self.assertEqual(rows[0]['id'],invoice)
+        self.assertGreaterEqual(rows[0]['age_days'],0)
+        self.assertEqual(self.service.queue(team='Procurement')[1],0)  # References are not actionable cases.
 
     def test_reprocessing_keeps_previous_corrections_and_reopens_case(self):
         id=self.create(extra='USD 25.00')

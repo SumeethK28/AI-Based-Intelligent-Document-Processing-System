@@ -1,4 +1,5 @@
 """Default-deny permissions and SQL row scopes, revalidated against server sessions."""
+import json
 from idp.security.auth import AccessDenied, AuthService, REVIEW_DEPARTMENT
 
 PERMISSIONS={
@@ -8,10 +9,12 @@ PERMISSIONS={
     'Procurement Reviewer':{'account','documents','review','analytics','export','source'},
     'Expense Reviewer':{'account','documents','review','analytics','export','source'},
     'Legal Reviewer':{'account','documents','review','analytics','export','source'},
+    'Document Reviewer':{'account','documents','review','analytics','export','source'},
     'Auditor':{'account','documents','analytics'},
 }
 for role in PERMISSIONS:
     if 'analytics' in PERMISSIONS[role] and role!='Auditor': PERMISSIONS[role].add('analytics_export')
+    if role=='Administrator' or role in REVIEW_DEPARTMENT: PERMISSIONS[role].add('intake')
 
 
 class AccessControl:
@@ -47,11 +50,44 @@ class AccessControl:
         args=list(departments)
         if mutation: return direct,args
         role=principal['role']
+        if role in REVIEW_DEPARTMENT:
+            readable_teams=[*departments,'Document Review']
+            if role=='Finance Reviewer': readable_teams.append('Procurement')
+            if role=='Document Reviewer': readable_teams.extend(['Finance','Procurement','Expense Processing','Legal','Document Operations'])
+            places=','.join('?' for _ in readable_teams)
+            retained=f"EXISTS(SELECT 1 FROM review_cases retained WHERE retained.document_id={alias}.id AND retained.team IN ({places}))"
+            direct+=f" OR ({retained} AND (EXISTS(SELECT 1 FROM processing_runs uploaded WHERE uploaded.document_id={alias}.id AND json_extract(uploaded.actor_context,'$.id')=? AND json_extract(uploaded.actor_context,'$.role')=?) OR EXISTS(SELECT 1 FROM review_events handed WHERE handed.document_id={alias}.id AND handed.event_type IN ('handoff','correction') AND json_extract(handed.previous_values,'$.team') IN ({placeholders}))))"
+            args.extend([*readable_teams,principal['id'],role,*departments])
         if role=='Finance Reviewer':
-            direct+=f" OR ({alias}.document_type='purchase_order' AND EXISTS(SELECT 1 FROM documents related JOIN review_cases related_case ON related_case.document_id=related.id WHERE related_case.team='Finance' AND json_extract(related.full_result,'$.matched_document_id')={alias}.id))"
+            direct+=f" OR ({alias}.document_type='purchase_order' AND EXISTS(SELECT 1 FROM documents related JOIN review_cases related_case ON related_case.document_id=related.id WHERE (related_case.team='Finance' OR (related_case.team IN ('Document Review','Procurement') AND (EXISTS(SELECT 1 FROM processing_runs uploaded WHERE uploaded.document_id=related.id AND json_extract(uploaded.actor_context,'$.id')=? AND json_extract(uploaded.actor_context,'$.role')='Finance Reviewer') OR EXISTS(SELECT 1 FROM review_events handed WHERE handed.document_id=related.id AND handed.event_type='handoff' AND json_extract(handed.previous_values,'$.team')='Finance')))) AND json_extract(related.full_result,'$.matched_document_id')={alias}.id))"
+            args.append(principal['id'])
         if role=='Procurement Reviewer':
             direct+=f" OR ({alias}.document_type='invoice' AND coalesce(json_extract({alias}.extracted_data,'$.po_reference'),'')!='' AND (json_extract({alias}.full_result,'$.cross_document_status') IN ('unmatched','ambiguous','mismatch','incomplete') OR EXISTS(SELECT 1 FROM review_cases linked WHERE linked.document_id=json_extract({alias}.full_result,'$.matched_document_id') AND linked.team='Procurement')))"
         return '('+direct+')',args
+
+    def intake(self, state=None, document_id=None, *, force=False):
+        principal=self.require('intake')
+        if self.repository.internal or principal['role']=='Administrator': return principal
+        if force:
+            raise AccessDenied('Forced reprocessing requires administrator oversight.')
+        if document_id is not None:
+            self.document(document_id)
+        if state is not None:
+            expected={'Finance Reviewer':'invoice','Procurement Reviewer':'purchase_order',
+                      'Expense Reviewer':'receipt','Legal Reviewer':'contract'}
+            if principal['role'] in expected and state.get('document_type')!=expected[principal['role']]:
+                raise AccessDenied('This document type requires intake by its responsible department or an administrator.')
+        return principal
+
+    def batch(self,batch_id=None):
+        principal=self.require('intake')
+        if self.repository.internal or principal['role']=='Administrator': return principal
+        if batch_id is not None:
+            with self.repository._connect() as db:
+                row=db.execute('SELECT submitted_by,actor_context FROM batch_jobs WHERE id=?',(batch_id,)).fetchone()
+            if not row or row['submitted_by']!=principal['id'] or json.loads(row['actor_context'] or '{}').get('role')!=principal['role']:
+                raise AccessDenied('Processing job is unavailable or belongs to another employee.')
+        return principal
 
     def document(self,document_id,permission='documents',*,mutation=False):
         principal=self.require(permission)

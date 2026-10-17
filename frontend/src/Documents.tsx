@@ -97,7 +97,7 @@ export function Filters({
             value={filters.max_amount ?? ""}
             set={(value) => update("max_amount", value)}
           />
-          {allowed(permissions, "batches") && (
+          {allowed(permissions, "intake") && (
             <BatchFilter
               value={filters.batch_id ?? ""}
               set={(value) => update("batch_id", value)}
@@ -168,8 +168,8 @@ export function Documents({
         }}
         items={[
           "Repository",
-          ...(allowed(permissions, "process") ? ["Upload"] : []),
-          ...(allowed(permissions, "batches") ? ["Processing jobs"] : []),
+          ...(allowed(permissions, "intake") ? ["Upload"] : []),
+          ...(allowed(permissions, "intake") ? ["Processing jobs"] : []),
         ]}
       />
       {view === "Repository" &&
@@ -369,6 +369,21 @@ export function DocumentDetail({
           />
         )}
       </div>
+      <Panel title="Responsibility & collaboration">
+        <div className="status-strip">
+          <div><small>Originally routed to</small><strong>{data.collaboration?.original_department ?? "Not recorded"}</strong></div>
+          <div><small>Current owner</small><strong>{data.case?.team ?? "Not recorded"}</strong></div>
+          <div><small>Assigned reviewer</small><strong>{data.case?.assignee ? String(data.case.assignee).split(":").slice(2).join(":") : "Unclaimed"}</strong></div>
+          <div><small>Uploaded by</small><strong>{data.collaboration?.uploaded_by?.username ?? "Not recorded"}</strong></div>
+          <div><small>Processed by</small><strong>{data.collaboration?.processed_by?.username ?? "Not recorded"}</strong></div>
+          <div><small>Last updated</small><strong>{data.collaboration?.last_updated ?? data.updated_at}</strong></div>
+        </div>
+        <p className="footnote">{data.collaboration?.can_review ? "This case is in your authorized work scope. Review safeguards still apply." : "Read-only access. Your account cannot change or approve this case."} Workflow routing and current case ownership are shown separately.</p>
+        {!!data.collaboration?.related_documents?.length && <Detail title="Related documents">
+          <Table rows={data.collaboration.related_documents} keys={["filename", "team", "assignee", "case_status", "review_decision", "last_updated"]} />
+          {data.collaboration.related_documents.map((linked: RecordData) => <Detail key={linked.id} title={`${linked.filename} · read-only reference`}><LinkedDocument id={linked.id} /></Detail>)}
+        </Detail>}
+      </Panel>
       <div className="status-strip">
         {[
           ["Workflow", state.workflow_status],
@@ -560,7 +575,7 @@ export function DocumentDetail({
               </div>
             )}
           </Panel>
-          {review && allowed(permissions, "review") && (
+          {review && data.collaboration?.can_review && (
             <ReviewActions document={data} />
           )}
           <Panel title="History & audit">
@@ -603,14 +618,14 @@ export function DocumentDetail({
 export function LinkedDocument({ id }: { id: number }) {
   const { data, error } = useLoad("/documents/" + id);
   return data ? (
-    <dl>
+    <div><p className="footnote">Read-only reference · {data.case?.team} · {words(data.review_decision)}. Last updated: {data.collaboration?.last_updated}.</p><dl>
       {Object.entries(data.extracted_data ?? {}).map(([k, v]) => (
         <div key={k}>
           <dt>{words(k)}</dt>
           <dd>{String(v ?? "—")}</dd>
         </div>
       ))}
-    </dl>
+    </dl><Detail title="Previous reviewer activity"><Table rows={data.events} keys={["actor", "event_type", "decision", "reason", "created_at"]} /></Detail></div>
   ) : (
     <State error={error} loading={!error} />
   );
@@ -740,11 +755,13 @@ export function ReviewActions({ document: doc }: { document: RecordData }) {
           set={setAction}
           options={[
             "claim",
+            "handoff",
             ...(allowed(permissions, "assign") ? ["assign"] : []),
             "status",
             "priority",
           ]}
         />
+        {action === "handoff" && <Select label="Send to responsible department" value={team} set={setTeam} options={["", ...(doc.collaboration?.handoff_departments ?? [])]} />}
         {action === "assign" && (
           <>
             <Select
@@ -847,7 +864,7 @@ export function AssigneeField({
 }
 
 export function UploadForm({ onSaved }: { onSaved: (id: string) => void }) {
-  const { run } = useContext(ActionContext),
+  const { run, permissions } = useContext(ActionContext),
     [files, setFiles] = useState<File[]>([]),
     [name, setName] = useState("Document upload"),
     [description, setDescription] = useState(""),
@@ -882,7 +899,7 @@ export function UploadForm({ onSaved }: { onSaved: (id: string) => void }) {
         </li>
       </ol>
       <p className="muted">
-        Select one or many invoices, purchase orders, receipts or contracts
+        Upload the document types handled by your department. Administrators can select mixed invoices, purchase orders, receipts or contracts
         together. PDF, PNG or JPEG · 20 MB per file · up to 50 files / 100 MB
         per upload.
       </p>
@@ -935,6 +952,7 @@ export function UploadForm({ onSaved }: { onSaved: (id: string) => void }) {
           </li>
         ))}
       </ul>
+      {allowed(permissions, "process") && (
       <Confirm
         value={force}
         set={(v) => {
@@ -945,6 +963,7 @@ export function UploadForm({ onSaved }: { onSaved: (id: string) => void }) {
         Force reprocessing of existing documents. This uses API quota and resets
         review decisions.
       </Confirm>
+      )}
       <Confirm value={consent} set={setConsent}>
         I authorize sending these documents’ OCR text to Groq and retaining
         their sources locally under the configured retention policy.

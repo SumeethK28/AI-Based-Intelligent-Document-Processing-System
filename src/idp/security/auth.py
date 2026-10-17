@@ -7,9 +7,9 @@ import time
 from argon2 import PasswordHasher
 from argon2.exceptions import VerificationError, InvalidHashError
 
-ROLES=('Administrator','Operations Manager','Finance Reviewer','Procurement Reviewer','Expense Reviewer','Legal Reviewer','Auditor')
+ROLES=('Administrator','Finance Reviewer','Procurement Reviewer','Expense Reviewer','Legal Reviewer','Document Reviewer','Auditor','Operations Manager')
 DEPARTMENTS=('Finance','Procurement','Expense Processing','Legal','Document Review','Risk Review','Document Operations')
-REVIEW_DEPARTMENT={'Finance Reviewer':'Finance','Procurement Reviewer':'Procurement','Expense Reviewer':'Expense Processing','Legal Reviewer':'Legal'}
+REVIEW_DEPARTMENT={'Finance Reviewer':'Finance','Procurement Reviewer':'Procurement','Expense Reviewer':'Expense Processing','Legal Reviewer':'Legal','Document Reviewer':'Document Review'}
 HASHER=PasswordHasher()
 DUMMY=HASHER.hash(secrets.token_urlsafe(32))
 
@@ -44,11 +44,15 @@ class AuthService:
             return connection.execute('INSERT INTO security_events(event_type,user_id,outcome,resource,created_at) VALUES(?,?,?,?,?)',values).lastrowid
 
     @staticmethod
-    def account_values(username,password,role,departments):
+    def credential_values(username,password):
         if not isinstance(username,str) or not re.fullmatch('[A-Za-z0-9_.-]{3,64}',username):
             raise ValueError('Use a unique 3–64 character account name with letters, numbers, dot, underscore or dash.')
         if not isinstance(password,str) or not 12<=len(password)<=128:
             raise ValueError('Use a password of 12–128 characters.')
+        return username.lower(),HASHER.hash(password)
+
+    @staticmethod
+    def role_values(role,departments):
         if role not in ROLES:
             raise ValueError('Select a supported role.')
         if role in REVIEW_DEPARTMENT:
@@ -57,19 +61,31 @@ class AuthService:
             departments=list(DEPARTMENTS)
         if not isinstance(departments,list) or not departments or any(value not in DEPARTMENTS for value in departments):
             raise ValueError('Select explicit authorized departments.')
-        return username.lower(),HASHER.hash(password),role,json.dumps(sorted(set(departments)))
+        return role,json.dumps(sorted(set(departments)))
+
+    @classmethod
+    def account_values(cls,username,password,role,departments):
+        return (*cls.credential_values(username,password),*cls.role_values(role,departments))
 
     def bootstrap(self,username,password,*,capability):
         from idp.security import INTERNAL
         if capability is not INTERNAL:
             raise AccessDenied('First administrator setup requires the local server CLI.')
+        return self._bootstrap(username,password)
+
+    def _bootstrap(self,username,password,setup_token=None):
+        if setup_token is not None:
+            self._verify_setup(setup_token)
         values=self.account_values(username,password,'Administrator',[])
         with self.repository._connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            if db.execute('SELECT count(*) FROM users').fetchone()[0]:
+            if db.execute('SELECT count(*) FROM users').fetchone()[0] or db.execute("SELECT 1 FROM security_events WHERE event_type='administrator_bootstrap' LIMIT 1").fetchone():
                 raise ValueError('Administrator setup already completed.')
+            if setup_token is not None:
+                self._verify_setup(setup_token,db)
             user_id=db.execute('INSERT INTO users(username,password_hash,role,departments,created_at) VALUES(?,?,?,?,?)',(*values,self.repository.timestamp())).lastrowid
             self.event('administrator_bootstrap','allowed',user_id=user_id,db=db)
+            db.execute('UPDATE setup_authorizations SET token_hash=NULL,used=1,expires_at=0')
         return user_id
 
     def login(self,username,password):
@@ -170,3 +186,96 @@ class AuthService:
             db.execute('UPDATE users SET password_hash=?,revision=revision+1 WHERE id=?',(hashed,actor['id']))
             db.execute('UPDATE auth_sessions SET revoked=1 WHERE user_id=?',(actor['id'],))
             self.event('password_changed','allowed',user_id=actor['id'],db=db)
+
+    def reset_password(self,user_id,expected_revision,new_password):
+        """Administrator supplies credentials privately; never return or log them."""
+        actor=self.repository.require('users')
+        if user_id==actor['id']:
+            raise ValueError('Use Change your password for your own account.')
+        with self.repository._connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row=db.execute('SELECT * FROM users WHERE id=?',(user_id,)).fetchone()
+            if not row or row['revision']!=expected_revision:
+                raise ValueError('Account changed. Refresh before resetting credentials.')
+            hashed=self.account_values(row['username'],new_password,row['role'],json.loads(row['departments']))[1]
+            db.execute('UPDATE users SET password_hash=?,revision=revision+1 WHERE id=?',(hashed,user_id))
+            db.execute('UPDATE auth_sessions SET revoked=1 WHERE user_id=?',(user_id,))
+            db.execute('DELETE FROM login_limits WHERE identifier_hash=?',(digest('account:'+row['username']),))
+            self.event('credentials_reset','allowed',str(user_id),actor['id'],db)
+
+
+    def onboarding_status(self):
+        with self.repository._connect() as db:
+            initialized=bool(db.execute('SELECT count(*) FROM users').fetchone()[0] or db.execute("SELECT 1 FROM security_events WHERE event_type='administrator_bootstrap' LIMIT 1").fetchone())
+            row=db.execute('SELECT * FROM setup_authorizations WHERE id=1').fetchone()
+        return {'setup_required':not initialized,'setup_authorized':bool(not initialized and row and not row['used'] and row['expires_at']>self.clock())}
+
+    def authorize_setup(self,*,capability):
+        from idp.security import INTERNAL
+        if capability is not INTERNAL: raise AccessDenied('Setup authorization requires the local operator CLI.')
+        token=secrets.token_urlsafe(32)
+        with self.repository._connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if db.execute('SELECT count(*) FROM users').fetchone()[0] or db.execute("SELECT 1 FROM security_events WHERE event_type='administrator_bootstrap' LIMIT 1").fetchone():
+                raise ValueError('Organization setup already completed; existing accounts are unchanged.')
+            db.execute('INSERT OR REPLACE INTO setup_authorizations VALUES(1,?,?,0)',(digest(token),self.clock()+900))
+            db.execute('DELETE FROM login_limits WHERE identifier_hash=?',(digest('setup-attempts'),))
+            self.event('setup_authorized','allowed','first_administrator',db=db)
+        return token
+
+    def _verify_setup(self,token,db=None):
+        if db is None:
+            with self.repository._connect() as connection:
+                return self._verify_setup(token,connection)
+        row=db.execute('SELECT * FROM setup_authorizations WHERE id=1').fetchone()
+        if not isinstance(token,str) or not 32<=len(token)<=128 or not row or row['used'] or self.clock()>=row['expires_at'] or not secrets.compare_digest(row['token_hash'] or '',digest(token)):
+            raise AuthenticationError('Setup unavailable or credential not accepted. Ask the local operator for a fresh authorization.')
+
+    def _public_budget(self,name,maximum):
+        """Separate bounded local-server budgets; never reset login protection."""
+        now=self.clock();key=digest(name)
+        with self.repository._connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row=db.execute('SELECT * FROM login_limits WHERE identifier_hash=?',(key,)).fetchone()
+            count=(row['failures'] if row and now-row['window_start']<900 else 0)+1
+            start=row['window_start'] if row and now-row['window_start']<900 else now
+            db.execute('INSERT OR REPLACE INTO login_limits VALUES(?,?,?,?)',(key,count,start,now+900 if count>maximum else 0))
+        if count>maximum: raise AuthenticationError('This operation is temporarily limited. Try again later.')
+
+    def complete_setup(self,username,password,setup_token):
+        self._public_budget('setup-attempts',10)
+        return self._bootstrap(username,password,setup_token)
+
+    def register(self,username,password):
+        self._public_budget('registration-attempts',30)
+        if self.onboarding_status()['setup_required']:
+            raise ValueError('Organization setup must be completed before employee registration.')
+        name,hashed=self.credential_values(username,password)
+        with self.repository._connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            # Duplicates never replace credentials or disclose account existence.
+            if not db.execute('SELECT 1 FROM users WHERE username=?',(name,)).fetchone():
+                db.execute('INSERT OR IGNORE INTO registration_requests(username,password_hash,created_at) VALUES(?,?,?)',(name,hashed,self.repository.timestamp()))
+            self.event('registration_received','allowed','employee_request',db=db)
+        return {'message':'If eligible, your request is awaiting administrator approval. You can sign in only after approval.'}
+
+    def registrations(self):
+        self.repository.require('users')
+        with self.repository._connect() as db:
+            return [dict(row) for row in db.execute("SELECT id,username,status,created_at,revision FROM registration_requests WHERE status='pending' ORDER BY created_at,id")]
+
+    def approve_registration(self,request_id,expected_revision,role,departments):
+        self.repository.require('users')
+        role,scope=self.role_values(role,departments)
+        with self.repository._connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            actor=self.repository.require('users')
+            row=db.execute('SELECT * FROM registration_requests WHERE id=?',(request_id,)).fetchone()
+            if not row or row['status']!='pending' or row['revision']!=expected_revision:
+                raise ValueError('Registration changed. Refresh before approving.')
+            if db.execute('SELECT 1 FROM users WHERE username=?',(row['username'],)).fetchone():
+                raise ValueError('Account already exists. Manage its access instead of replacing credentials.')
+            user_id=db.execute('INSERT INTO users(username,password_hash,role,departments,created_at) VALUES(?,?,?,?,?)',(row['username'],row['password_hash'],role,scope,self.repository.timestamp())).lastrowid
+            db.execute("UPDATE registration_requests SET status='approved',password_hash=NULL,approved_by=?,approved_at=?,revision=revision+1 WHERE id=?",(actor['id'],self.repository.timestamp(),request_id))
+            self.event('registration_approved','allowed',str(user_id),actor['id'],db)
+        return user_id

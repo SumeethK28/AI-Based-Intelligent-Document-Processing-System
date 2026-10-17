@@ -23,7 +23,6 @@ import {
   message,
   ActionContext,
   Button,
-  TextField,
   Detail,
 } from "./components";
 import { createRoot } from "react-dom/client";
@@ -31,7 +30,7 @@ import { Overview } from "./Overview";
 import { Documents } from "./Documents";
 import { MyWork } from "./MyWork";
 import { Insights } from "./Insights";
-import { Administration, Account } from "./Administration";
+import { Administration, Account, AccessScreen } from "./Administration";
 import "./styles.css";
 
 function App() {
@@ -45,8 +44,6 @@ function App() {
     [busy, setBusy] = useState(false),
     [error, setError] = useState(""),
     [notice, setNotice] = useState(""),
-    [username, setUsername] = useState(""),
-    [password, setPassword] = useState(""),
     [nav, setNav] = useState(false),
     [dark, setDark] = useState(localStorage.getItem("idp-theme") === "dark");
   useEffect(() => {
@@ -56,7 +53,10 @@ function App() {
       .finally(() => setReady(true));
     const end = () => {
       setSession(undefined);
-      setPassword("");
+      setPage("Overview");
+      setDocumentView("Repository");
+      setDocumentSearch("");
+      setSearchDraft("");
     };
     window.addEventListener("idp-session-ended", end);
     return () => window.removeEventListener("idp-session-ended", end);
@@ -120,71 +120,9 @@ function App() {
               Evidence-grounded. Human-reviewed.
             </div>
           </div>
-          <div className="signin-form">
-            <div className="brand mobile-brand">
-              <span className="brand-mark">d</span>Document Operations
-            </div>
-            <h2>Welcome back</h2>
-            <p className="muted">Sign in to your authorized workspace.</p>
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                const fields = new FormData(e.currentTarget);
-                const submittedUsername = String(fields.get("username") ?? "");
-                const submittedPassword = String(fields.get("password") ?? "");
-                run(async () => {
-                  await api("/login", {
-                    username: submittedUsername,
-                    password: submittedPassword,
-                  });
-                  setPassword("");
-                  setSession(await api<Session>("/session"));
-                });
-              }}
-            >
-              <TextField
-                label="Account name"
-                name="username"
-                autoComplete="username"
-                value={username}
-                set={setUsername}
-                required
-              />
-              <TextField
-                label="Password"
-                name="password"
-                autoComplete="current-password"
-                value={password}
-                set={setPassword}
-                type="password"
-                required
-              />
-              {error && (
-                <p className="notice error" role="alert">
-                  {error}
-                </p>
-              )}
-              <Button primary type="submit">
-                {busy ? "Signing in…" : "Sign in"}
-                <ArrowUpRight size={17} />
-              </Button>
-            </form>
-            <p className="footnote">
-              Use your individual account. Sessions expire after 15 minutes of
-              inactivity or one hour in total.
-            </p>
-            <Detail title="First-time administrator setup">
-              <p>
-                Use the existing local administrator setup command on this
-                computer. No default account or public administrator
-                registration is provided.
-              </p>
-              <code>
-                uv run --python 3.14.6 python scripts/manage_security.py
-                bootstrap
-              </code>
-            </Detail>
-          </div>
+          <AccessScreen error={error} onSignedIn={(value) => {
+            setPage("Overview"); setDocumentView("Repository"); setDocumentSearch(""); setSearchDraft(""); setSession(value);
+          }} />
         </div>
       ) : (
         <div className="app-shell">
@@ -205,7 +143,7 @@ function App() {
               </button>
             </div>
             <div className="workspace-label">YOUR WORKSPACE</div>
-            {permissions.includes("process") && (
+            {permissions.includes("intake") && (
               <Button
                 primary
                 aria-label="Upload document"
@@ -259,6 +197,10 @@ function App() {
                   run(async () => {
                     await api("/logout", {});
                     setSession(undefined);
+                    setPage("Overview");
+                    setDocumentView("Repository");
+                    setDocumentSearch("");
+                    setSearchDraft("");
                   })
                 }
               >
@@ -347,7 +289,7 @@ function App() {
                 </div>
               )}
               {page === "Overview" ? (
-                <Overview navigate={navigate} />
+                <Overview navigate={navigate} session={session} />
               ) : page === "Documents" ? (
                 <Documents
                   key={documentVisit}

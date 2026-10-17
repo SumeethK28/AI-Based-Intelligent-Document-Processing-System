@@ -31,6 +31,10 @@ class DocumentRepository:
         migrate_policy(self)
         from idp.storage.security_migration import migrate_security
         migrate_security(self)
+        from idp.storage.security_migration import migrate_collaboration
+        migrate_collaboration(self)
+        from idp.storage.security_migration import migrate_onboarding
+        migrate_onboarding(self)
 
     def require(self, permission):
         return self.access.require(permission)
@@ -118,11 +122,13 @@ class DocumentRepository:
             )
 
     def find_by_hash(self, file_hash: str) -> dict[str, Any] | None:
-        self.require('process')
+        self.access.intake()
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM documents WHERE file_hash = ?", (file_hash,)
             ).fetchone()
+        if row is not None:
+            self.access.intake(document_id=row['id'])
         return dict(row) if row is not None else None
 
     def check_duplicate(self, file_path: str | Path) -> dict[str, Any] | None:
@@ -136,13 +142,14 @@ class DocumentRepository:
         operation_key: str | None = None,
     ) -> dict[str, Any]:
         """Create a unique document or record an exact duplicate upload."""
-        self.require('process')
+        principal=self.access.intake(final_state)
         file_hash = self.calculate_hash(file_path)
         now = self.timestamp()
         result_json, extracted_json = self._encode_result(final_state)
 
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            principal=self.access.intake(final_state)
             if operation_key:
                 prior = connection.execute('SELECT id,document_id,is_duplicate FROM processing_runs WHERE operation_key=?', (operation_key,)).fetchone()
                 if prior:
@@ -152,6 +159,7 @@ class DocumentRepository:
             ).fetchone()
             if existing is not None:
                 document_id = existing["id"]
+                self.access.intake(document_id=document_id)
                 is_duplicate = True
             else:
                 cursor = connection.execute(
@@ -186,6 +194,8 @@ class DocumentRepository:
                 (document_id, filename, int(is_duplicate), now),
             )
             run_id = run_cursor.lastrowid
+            context=None if self.internal else json.dumps({key:principal[key] for key in ('id','username','role','departments')})
+            connection.execute('UPDATE processing_runs SET actor_context=? WHERE id=?',(context,run_id))
             connection.execute('UPDATE processing_runs SET operation_key=?,result_snapshot=? WHERE id=?', (operation_key, result_json, run_id))
             if not is_duplicate:
                 from idp.storage.review_migration import capture_version
@@ -210,13 +220,14 @@ class DocumentRepository:
         Reprocessing resets the review decision. This schema keeps only the
         latest full result, not a snapshot per processing run.
         """
-        self.require('process')
+        principal=self.access.intake(final_state,force=True)
         file_hash = self.calculate_hash(file_path)
         now = self.timestamp()
         result_json, extracted_json = self._encode_result(final_state)
 
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            principal=self.access.intake(final_state,force=True)
             if operation_key:
                 prior = connection.execute('SELECT id,document_id FROM processing_runs WHERE operation_key=?', (operation_key,)).fetchone()
                 if prior:
@@ -257,6 +268,8 @@ class DocumentRepository:
                 (document_id, filename, now),
             )
             run_id = run_cursor.lastrowid
+            context=None if self.internal else json.dumps({key:principal[key] for key in ('id','username','role','departments')})
+            connection.execute('UPDATE processing_runs SET actor_context=? WHERE id=?',(context,run_id))
             connection.execute('UPDATE processing_runs SET operation_key=?,result_snapshot=? WHERE id=?', (operation_key, result_json, run_id))
             from idp.storage.review_migration import capture_version
             from idp.review.service import ReviewService

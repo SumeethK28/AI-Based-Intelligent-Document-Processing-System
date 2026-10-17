@@ -956,6 +956,9 @@ textarea {
   min-width: 90px;
   flex: 1;
 }
+.status-strip strong {
+  overflow-wrap: anywhere;
+}
 .status-strip small {
   display: block;
   color: var(--muted);
@@ -1746,4 +1749,29 @@ footer {
   .form-grid {
     grid-template-columns: 1fr;
   }
+}
+
+/* Preserve readable filenames in wide tables and use semantic cards on phones. */
+.access-options { display: flex; flex-wrap: wrap; gap: 10px; margin: 18px 0; }
+.case-list, .case-table { min-width: 0; max-width: 100%; }
+.case-table table { min-width: 850px; }
+.case-table td:first-child, .case-table th:first-child { min-width: 240px; width: 30%; }
+.case-table .record-identity strong, .case-card-filename {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.case-cards { display: none; }
+.case-card { min-width: 0; padding: 18px; border: 1px solid var(--border); background: var(--surface); border-radius: 12px; }
+.case-card h3 { margin: 0 0 8px; font-size: 17px; line-height: 1.5; }
+.case-card-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 16px 0; }
+.case-card-fields > div { min-width: 0; }
+.case-card-fields dt { color: var(--muted); font-size: 13px; margin-bottom: 6px; }
+.case-card-fields dd { margin: 0; overflow-wrap: anywhere; }
+.case-full-filename { overflow-wrap: anywhere; white-space: normal; }
+@media (max-width: 760px) {
+  .case-table { display: none; }
+  .case-cards { display: grid; gap: 16px; }
 }

@@ -1,6 +1,8 @@
 from idp.security import INTERNAL
 
 import sys
+import os
+from dotenv import load_dotenv
 from pathlib import Path
 
 from idp.agents.graph import build_agent_graph
@@ -12,6 +14,7 @@ from idp.storage.repository import DocumentRepository
 
 
 def main():
+    load_dotenv()
 
     if len(sys.argv) != 2:
         print(
@@ -25,7 +28,7 @@ def main():
     if not file_path.is_file():
         raise FileNotFoundError(file_path)
 
-    repository = DocumentRepository(_capability=INTERNAL)
+    repository = DocumentRepository(os.getenv('IDP_DATABASE_PATH','data/idp.db'), _capability=INTERNAL)
     existing_document = repository.check_duplicate(
         file_path
     )
