@@ -35,6 +35,8 @@ class DocumentRepository:
         migrate_collaboration(self)
         from idp.storage.security_migration import migrate_onboarding
         migrate_onboarding(self)
+        from idp.storage.security_migration import migrate_department_requests
+        migrate_department_requests(self)
 
     def require(self, permission):
         return self.access.require(permission)

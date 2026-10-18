@@ -1771,6 +1771,18 @@ footer {
 .case-card-fields dt { color: var(--muted); font-size: 13px; margin-bottom: 6px; }
 .case-card-fields dd { margin: 0; overflow-wrap: anywhere; }
 .case-full-filename { overflow-wrap: anywhere; white-space: normal; }
+.outcome-summary { min-width: 0; overflow-wrap: anywhere; }
+.notice.outcome { background: var(--surface); color: var(--ink); border: 1px solid var(--border); }
+.outcome-summary p { margin: 6px 0; }
+.issue-list { margin: 8px 0 0; padding-left: 20px; }
+.issue-list li + li { margin-top: 6px; }
+.account-request-summary { color: var(--ink); margin-top: 16px; }
+.account-type-explanation { color: var(--ink); background: var(--surface); border-left: 3px solid var(--border); padding: 12px 14px; line-height: 1.6; overflow-wrap: anywhere; }
+.structured-list { margin: 0; padding-left: 18px; overflow-wrap: anywhere; }
+.structured-value { display: grid; grid-template-columns: minmax(0,1fr); gap: 8px; margin: 0; overflow-wrap: anywhere; }
+.structured-value dd { margin: 2px 0 0; }
+.document-detail .notice { align-items: flex-start; }
+.document-detail .notice > svg { flex: 0 0 auto; margin-top: 2px; }
 @media (max-width: 760px) {
   .case-table { display: none; }
   .case-cards { display: grid; gap: 16px; }

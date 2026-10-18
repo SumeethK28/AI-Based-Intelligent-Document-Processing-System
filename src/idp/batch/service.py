@@ -51,14 +51,16 @@ def worker_lock(path):
 def safe_failure(error):
     # Never persist provider exception strings, keys, response bodies or local paths.
     status = getattr(error, 'status_code', None)
+    if isinstance(error, ValueError) and str(error).startswith('GROQ_API_KEY is missing.'):
+        return 'configuration', 'Document processing is not configured. Contact your administrator.'
     if status == 429:
-        return 'rate_limit', 'Provider quota reached after bounded retries. Retry later.'
+        return 'rate_limit', 'Processing is temporarily unavailable. Retry later.'
     if status in {401,403}:
-        return 'credentials', 'Provider authorization failed. Check local configuration before retrying.'
+        return 'credentials', 'Document processing cannot start. Contact your administrator.'
     if status == 400:
-        return 'request', 'Provider rejected the request. Check document support and configuration.'
+        return 'request', 'This document could not be processed. Check its format or contact your administrator.'
     if status and status >= 500 or isinstance(error, (TimeoutError, ConnectionError)) or type(error).__name__ in {'APIConnectionError','APITimeoutError'}:
-        return 'transient', 'Provider or connection temporarily unavailable. Retry later.'
+        return 'transient', 'Processing is temporarily unavailable. Retry later.'
     if isinstance(error, (ValueError, FileNotFoundError)):
         return 'document', 'Source is unavailable, damaged, changed or could not be processed. Check retained source.'
     return 'processing', 'Document processing failed. Other items continue; inspect the source and retry.'

@@ -2,6 +2,7 @@ import { useState, useContext } from "react";
 
 import { ShieldCheck } from "lucide-react";
 import { api, RecordData, Session } from "./api";
+import { accountTypes, accountTypeLabel, businessText } from "./presentation";
 
 import {
   words,
@@ -243,19 +244,25 @@ export function People() {
   return (
     <>
       <Panel title="Pending employee registrations">
-        <p className="footnote">Requests have no login, document or department access until you approve a role and scope. Passwords are never displayed.</p>
-        <Table rows={data.registration_requests ?? []} keys={["username", "status", "created_at"]} />
+        <p className="footnote">The requested account type does not grant access. Choose the approved role and department, or decline the request.</p>
+        <Table rows={data.registration_requests ?? []} keys={["username", "requested_department", "status", "created_at"]} cells={{requested_department:(request)=>accountTypeLabel(request.requested_department)}} />
         {!!data.registration_requests?.length && <>
           <Select label="Registration request" value={requestId} set={(value) => {setRequestId(value); setApprovalConfirmed(false);}} options={["", ...data.registration_requests.map((row: RecordData) => String(row.id))]} labels={Object.fromEntries([["", "Choose a pending employee"], ...data.registration_requests.map((row: RecordData) => [String(row.id), row.username])])} />
           <Select label="Approved employee role" value={approvalRole} set={(value) => {setApprovalRole(value); setApprovalConfirmed(false);}} options={data.roles} />
           {data.role_departments?.[approvalRole] ? <p>Department: {data.role_departments[approvalRole]}</p> : approvalRole === "Administrator" ? <p>Organization-wide administrator scope</p> : scopes(approvalDepartments, setApprovalDepartments)}
-          <Confirm value={approvalConfirmed} set={setApprovalConfirmed}>I verified this employee and approve the selected role and department.</Confirm>
+          <Confirm value={approvalConfirmed} set={setApprovalConfirmed}>I verified this employee and confirm this account request decision.</Confirm>
           <Button disabled={!requestId || !approvalConfirmed} onClick={() => run(async () => {
             const request = data.registration_requests.find((row: RecordData) => String(row.id) === requestId);
             if (!request) return;
             await api(`/registrations/${requestId}/approve`, { expected_revision: request.revision, role: approvalRole, departments: approvalDepartments, confirmed: approvalConfirmed });
             setRequestId(""); setApprovalConfirmed(false);
           })}>Approve employee registration</Button>
+          <Button disabled={!requestId || !approvalConfirmed} onClick={() => run(async () => {
+            const request = data.registration_requests.find((row: RecordData) => String(row.id) === requestId);
+            if (!request) return;
+            await api(`/registrations/${requestId}/reject`, { expected_revision: request.revision, confirmed: approvalConfirmed });
+            setRequestId(""); setApprovalConfirmed(false);
+          })}>Decline request</Button>
         </>}
       </Panel>
       <Panel title="Individual accounts">
@@ -268,8 +275,10 @@ export function People() {
           rows={data.users.map((user: RecordData) => ({
             ...user,
             account_status: user.active ? "Active" : "Disabled",
+            approved_role: user.role,
+            approved_departments: user.departments,
           }))}
-          keys={["username", "role", "departments", "account_status"]}
+          keys={["username", "requested_department", "approved_role", "approved_departments", "account_status"]}
           cells={{
             username: (user) => (
               <div className="account-identity">
@@ -282,8 +291,9 @@ export function People() {
                 </div>
               </div>
             ),
-            role: (user) => <span className="role-chip">{user.role}</span>,
-            departments: (user) => {
+            requested_department: (user) => accountTypeLabel(user.requested_department),
+            approved_role: (user) => <span className="role-chip">{user.role}</span>,
+            approved_departments: (user) => {
               let values: unknown = user.departments;
               if (typeof values === "string") {
                 try {
@@ -424,12 +434,12 @@ export function Audit() {
     <>
       <Panel title="Data handling">
         <p>
-          OCR runs locally. Processing sends document text to the configured
-          Groq service. SQLite stores extracted information and decisions; batch
+          Text recognition runs locally. Processing sends document text to the configured
+          external AI service. Local storage preserves extracted information and decisions; upload
           sources are retained locally.
         </p>
         <p className="footnote">
-          This research prototype has no MFA, encrypted SQLite or compliance
+          This installation has no multi-factor sign-in, encrypted database or compliance
           certification. Operating-system administrators remain privileged.
         </p>
       </Panel>
@@ -519,6 +529,7 @@ export function AccessScreen({ onSignedIn, error }: { onSignedIn: (value: Sessio
   const [again, setAgain] = useState("");
   const [notice, setNotice] = useState("");
   const [setupToken, setSetupToken] = useState("");
+  const [requestedDepartment, setRequestedDepartment] = useState("");
   const choose = (value: string) => {
     setMode(value); setPassword(""); setAgain(""); setSetupToken(""); setNotice("");
   };
@@ -533,7 +544,7 @@ export function AccessScreen({ onSignedIn, error }: { onSignedIn: (value: Sessio
       {setup && <Button onClick={() => choose("sign-in")}>Sign in</Button>}
     </div>
     {notice && <p className="notice" role="status">{notice}</p>}
-    {error && <p className="notice error" role="alert">{error}</p>}
+    {error && <p className="notice error" role="alert">{businessText(error)}</p>}
     <form onSubmit={(event) => {
       event.preventDefault();
       run(async () => {
@@ -543,7 +554,7 @@ export function AccessScreen({ onSignedIn, error }: { onSignedIn: (value: Sessio
             setMode("sign-in"); setNotice("Account created. You can now sign in.");
             window.dispatchEvent(new Event("idp-refresh"));
           } else if (registration) {
-            await api("/registrations", { username, password });
+            await api("/registrations", { username, password, requested_department: requestedDepartment });
             setMode("sign-in"); setNotice("Request received. Sign in after your administrator approves your account.");
           } else {
             await api("/login", { username, password });
@@ -556,7 +567,14 @@ export function AccessScreen({ onSignedIn, error }: { onSignedIn: (value: Sessio
       <TextField label="Account name" value={username} set={setUsername} name="username" autoComplete="username" required />
       <TextField label={registration || setup ? "Password (12–128 characters)" : "Password"} value={password} set={setPassword} name="password" type="password" autoComplete={mode === "sign-in" ? "current-password" : "new-password"} required />
       {mode !== "sign-in" && <TextField label="Repeat password" value={again} set={setAgain} name="repeat_password" type="password" autoComplete="new-password" required />}
-      <Button primary type="submit" disabled={busy || !username || !password || ((registration || setup) && (password.length < 12 || password.length > 128 || password !== again)) || (setup && !setupToken)}>
+      {registration && <>
+        <Select label="Choose your account type" describedBy="account-type-help" value={requestedDepartment} set={setRequestedDepartment}
+          options={["", ...accountTypes.filter(type => onboarding?.requested_departments?.includes(type.department)).map(type=>type.department)]}
+          labels={Object.fromEntries([["","Select an account type"],...accountTypes.map(type=>[type.department,type.label])])} />
+        <p id="account-type-help" className="account-type-explanation" aria-live="polite">{accountTypes.find(type=>type.department===requestedDepartment)?.description ?? "Choose the account type that best matches your work."}</p>
+        <p className="footnote">Your account request will be reviewed by an Administrator. Access becomes available after approval.</p>
+      </>}
+      <Button primary type="submit" disabled={busy || !username || !password || (registration && !requestedDepartment) || ((registration || setup) && (password.length < 12 || password.length > 128 || password !== again)) || (setup && !setupToken)}>
         {busy ? "Please wait..." : registration || setup ? "Create account" : "Sign in"}
       </Button>
     </form>

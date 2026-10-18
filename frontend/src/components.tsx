@@ -9,14 +9,12 @@ import {
 import * as Tabs from "@radix-ui/react-tabs";
 import { ArrowUpRight, ChevronRight, Download, FileText } from "lucide-react";
 import { api, download, RecordData } from "./api";
+import { words, statusLabel, businessText, optionLabel } from "./presentation";
+export { words } from "./presentation";
 
-export const words = (value: unknown) =>
-  String(value ?? "Not recorded")
-    .replaceAll("_", " ")
-    .replace(/^./, (s) => s.toUpperCase());
 export const message = (error: unknown) =>
   error instanceof Error
-    ? error.message
+    ? businessText(error.message)
     : "The operation could not be completed.";
 export const ActionContext = createContext({
   run: async (job: () => Promise<unknown>) => {
@@ -141,19 +139,21 @@ export function Select({
   set,
   options,
   labels,
+  describedBy,
 }: {
   label: string;
   value: string;
   set: (v: string) => void;
   options: string[];
   labels?: Record<string,string>;
+  describedBy?: string;
 }) {
   return (
     <Field label={label}>
-      <select value={value} onChange={(e) => set(e.target.value)}>
+      <select aria-label={label} aria-describedby={describedBy} value={value} onChange={(e) => set(e.target.value)}>
         {options.map((v) => (
           <option key={v} value={v}>
-            {labels?.[v] ?? (v ? words(v) : "All")}
+            {labels?.[v] ?? (v ? optionLabel(v) : "All")}
           </option>
         ))}
       </select>
@@ -224,14 +224,14 @@ export function Detail({
   );
 }
 
-export function Badge({ value }: { value: unknown }) {
-  let text = words(value),
+export function Badge({ value, department }: { value: unknown; department?: string }) {
+  let text = statusLabel(value,department),
     tone =
-      /mismatch|high|reject|failed|manual|correction|escalat|anomaly|incomplete|unmatched|ambiguous/i.test(
-        text,
+      /mismatch|high|medium|reject|failed|manual|correction|escalat|anomaly|incomplete|unmatched|ambiguous/i.test(
+        String(value),
       )
         ? "warning"
-        : /passed|approved|matched|completed|low/i.test(text)
+        : /passed|approved|matched|completed|low/i.test(String(value))
           ? "good"
           : "";
   return <span className={"badge " + tone}>{text}</span>;
@@ -246,13 +246,22 @@ export function State({
 }) {
   return error ? (
     <p className="notice error" role="alert">
-      {error}
+      {businessText(error)}
     </p>
   ) : loading ? (
     <p className="loading" role="status">
       Loading workspace…
     </p>
   ) : null;
+}
+
+function DisplayValue({value,depth=0}:{value:unknown;depth?:number}): ReactNode {
+  if(value == null) return "—";
+  if(typeof value === "boolean") return value ? "Yes" : "No";
+  if(typeof value !== "object") return businessText(value);
+  if(depth >= 8) return "Additional nested details are available in the authorized export.";
+  if(Array.isArray(value)) return value.length ? <ul className="structured-list">{value.map((item,index)=><li key={index}><DisplayValue value={item} depth={depth+1} /></li>)}</ul> : "None recorded";
+  return <dl className="structured-value">{Object.entries(value).filter(([key])=>!/(?:password|secret|token|api_key|source_path|raw_response|raw_model|stack_trace)/i.test(key)).map(([key,item])=><div key={key}><dt>{words(key)}</dt><dd><DisplayValue value={item} depth={depth+1} /></dd></div>)}</dl>;
 }
 
 export function Table({
@@ -328,12 +337,24 @@ export function Table({
                             : "Not recorded"
                       }
                     />
-                  ) : /status|decision|risk/.test(k) ? (
-                    <Badge value={row[k]} />
+                  ) : k === "outcome" ? (
+                    <Badge value={row[k] === "failed" ? "Check failed" : row[k]} />
+                  ) : /status|decision|risk/.test(k) || k === "state" ? (
+                    <Badge value={row[k]} department={row.assigned_department ?? row.department} />
+                  ) : ["safe_error","reason","description","message","notes"].includes(k) ? (
+                    businessText(row[k])
+                  ) : k === "event_type" ? (
+                    words(row[k])
+                  ) : k === "actor_kind" ? (
+                    optionLabel(row[k] ?? "Not recorded")
+                  ) : k === "actor" ? (
+                    String(row[k] ?? "").startsWith("user:") ? String(row[k]).split(":").slice(2).join(":") : String(row[k] ?? "").startsWith("system:") ? "Automatic check" : row[k]
                   ) : row[k] == null ? (
                     "—"
+                  ) : typeof row[k] === "boolean" ? (
+                    row[k] ? "Yes" : "No"
                   ) : typeof row[k] === "object" ? (
-                    JSON.stringify(row[k])
+                    <DisplayValue value={row[k]} />
                   ) : (
                     String(row[k] ?? "—")
                   )}

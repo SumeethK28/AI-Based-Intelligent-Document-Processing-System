@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from idp.storage.repository import DocumentRepository
 from idp.storage.operations import DocumentFilters, OperationsQueries
-from idp.security.auth import AccessDenied, AuthenticationError, AuthService
+from idp.security.auth import AccessDenied, AuthenticationError, AuthService, REQUEST_DEPARTMENTS
 from idp.security.access import PERMISSIONS
 from idp.security.downloads import DownloadService
 from idp.review.service import ReviewService, ReviewConflict, UnsafeApproval
@@ -36,6 +36,15 @@ class Login(Input):
 
 class FirstSetup(Login):
     setup_token: str = Field(min_length=32,max_length=128)
+
+
+class Registration(Login):
+    requested_department: str | None = Field(default=None,max_length=40)
+
+
+class RegistrationRejection(Input):
+    expected_revision: int = Field(ge=0)
+    confirmed: Literal[True]
 
 
 class RegistrationApproval(Input):
@@ -208,7 +217,8 @@ def create_app(database_path=None, *, pipeline_factory=None, frontend=None):
 
     @app.get('/api/onboarding')
     def onboarding():
-        return AuthService(DocumentRepository(app.state.database_path)).onboarding_status()
+        return {**AuthService(DocumentRepository(app.state.database_path)).onboarding_status(),
+                'requested_departments':REQUEST_DEPARTMENTS}
 
     @app.post('/api/setup')
     def first_setup(body:FirstSetup):
@@ -216,8 +226,13 @@ def create_app(database_path=None, *, pipeline_factory=None, frontend=None):
         return {'ok':True,'message':'Organization setup completed. Sign in with your administrator account.'}
 
     @app.post('/api/registrations')
-    def register(body:Login):
-        return AuthService(DocumentRepository(app.state.database_path)).register(body.username,body.password)
+    def register(body:Registration):
+        return AuthService(DocumentRepository(app.state.database_path)).register(body.username,body.password,body.requested_department)
+
+    @app.post('/api/registrations/{request_id}/reject')
+    def reject_registration(request_id:int,body:RegistrationRejection,repo:Repo):
+        AuthService(repo).reject_registration(request_id,body.expected_revision)
+        return {'ok':True}
 
     @app.post('/api/registrations/{request_id}/approve')
     def approve(request_id:int,body:RegistrationApproval,repo:Repo):
@@ -245,6 +260,8 @@ def create_app(database_path=None, *, pipeline_factory=None, frontend=None):
         result=OperationsQueries(repo).overview(filters_for(request))
         if 'review' in PERMISSIONS.get(repo.require('account')['role'],set()):
             result['employee_work']=ReviewService(repo).work_summary(filters_for(request))
+        if 'users' in PERMISSIONS.get(repo.require('account')['role'],set()):
+            result['pending_registrations']=len(AuthService(repo).registrations())
         return result
 
     @app.get('/api/documents')

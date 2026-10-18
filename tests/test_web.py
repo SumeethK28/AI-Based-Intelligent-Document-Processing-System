@@ -544,7 +544,8 @@ class WebTests(PipelineFixture):
         from idp.security import INTERNAL
         path=self.root/'first_install.db';app=create_app(path)
         client=TestClient(app,headers={'x-idp-request':'1'})
-        self.assertEqual(client.get('/api/onboarding').json(),{'setup_required':True,'setup_authorized':False})
+        from idp.security.auth import REQUEST_DEPARTMENTS
+        self.assertEqual(client.get('/api/onboarding').json(),{'setup_required':True,'setup_authorized':False,'requested_departments':list(REQUEST_DEPARTMENTS)})
         body={'username':'initial-admin','password':self.password,'setup_token':'x'*43}
         self.assertEqual(client.post('/api/setup',json=body).status_code,401)
         self.assertEqual(client.post('/api/registrations',json={'username':'early-employee','password':self.password}).status_code,400)
@@ -619,3 +620,73 @@ class WebTests(PipelineFixture):
             statuses=list(executor.map(submit,range(2)))
         self.assertEqual(statuses.count(200),1,statuses)
         with repo.connect() as db:self.assertEqual(db.execute('SELECT count(*) FROM users').fetchone()[0],1)
+
+    def test_requested_department_override_and_returning_employee(self):
+        applicant=TestClient(self.app,headers={'x-idp-request':'1'})
+        credentials={'username':'department-applicant','password':self.password}
+        self.assertEqual(applicant.post('/api/registrations',json={**credentials,'requested_department':'Finance'}).status_code,200)
+        self.assertEqual(applicant.post('/api/login',json=credentials).status_code,401)
+        request=self.client.get('/api/users').json()['registration_requests'][0]
+        self.assertEqual(request['requested_department'],'Finance')
+        self.assertEqual(self.client.get('/api/overview').json()['pending_registrations'],1)
+        approved=self.client.post(f"/api/registrations/{request['id']}/approve",json={
+            'expected_revision':0,'role':'Legal Reviewer','departments':['Finance'],'confirmed':True})
+        self.assertEqual(approved.status_code,200)
+        account=next(user for user in self.client.get('/api/users').json()['users'] if user['id']==approved.json()['id'])
+        self.assertEqual(account['requested_department'],'Finance')
+        self.assertEqual(account['role'],'Legal Reviewer')
+        self.assertEqual(account['departments'],'["Legal"]')
+        self.assertNotIn('password_hash',account)
+        self.assertEqual(applicant.post('/api/login',json=credentials).status_code,200)
+        session=applicant.get('/api/session').json()
+        self.assertEqual(session['departments'],['Legal'])
+        self.assertNotIn('users',session['permissions'])
+        self.assertNotIn('pending_registrations',applicant.get('/api/overview').json())
+        self.assertEqual(applicant.get(f'/api/documents/{self.contract}').status_code,200)
+        self.assertEqual(applicant.get(f'/api/documents/{self.invoice}').status_code,403)
+        self.assertEqual(applicant.post(f"/api/users/{approved.json()['id']}",json={
+            'expected_revision':0,'role':'Administrator','departments':['Finance'],'active':True,'confirmed':True}).status_code,403)
+        applicant.post('/api/logout')
+        restarted=TestClient(create_app(self.repo.db_path),headers={'x-idp-request':'1'})
+        self.assertEqual(restarted.post('/api/login',json=credentials).status_code,200)
+        self.assertEqual(restarted.get('/api/session').json()['departments'],['Legal'])
+        self.assertEqual(restarted.get(f'/api/documents/{self.contract}').status_code,200)
+
+    def test_department_request_cannot_spoof_authority_and_decline_is_guarded(self):
+        applicant=TestClient(self.app,headers={'x-idp-request':'1'})
+        body={'username':'decline-applicant','password':self.password,'requested_department':'Legal'}
+        for extra in ({'role':'Administrator'},{'departments':['Finance']},{'user_id':1},{'requested_department':'Administrator'}):
+            response=applicant.post('/api/registrations',json={**body,**extra})
+            self.assertIn(response.status_code,(400,422))
+            self.assertNotIn(self.password,response.text)
+        self.assertEqual(applicant.post('/api/registrations',json=body).status_code,200)
+        request=self.client.get('/api/users').json()['registration_requests'][0]
+        path=f"/api/registrations/{request['id']}/reject"
+        payload={'expected_revision':0,'confirmed':True}
+        self.assertEqual(applicant.post(path,json=payload).status_code,401)
+        finance=TestClient(self.app,headers={'x-idp-request':'1'});self.login('web-finance',finance)
+        self.assertEqual(finance.post(path,json=payload).status_code,403)
+        self.assertEqual(self.client.post(path,json={**payload,'confirmed':False}).status_code,422)
+        self.assertEqual(self.client.post(path,json={**payload,'expected_revision':99}).status_code,400)
+        self.assertEqual(self.client.post(path,json=payload).status_code,200)
+        self.assertEqual(self.client.get('/api/users').json()['registration_requests'],[])
+        self.assertEqual(applicant.post('/api/login',json={'username':body['username'],'password':self.password}).status_code,401)
+        with self.repo.connect() as db:
+            event=db.execute("SELECT * FROM security_events WHERE event_type='registration_declined'").fetchone()
+            self.assertEqual(event['user_id'],AuthService(self.repo).resolve(self.client.cookies['idp_session'])['id'])
+
+    def test_all_eight_roles_keep_server_side_destinations_and_mutation_guards(self):
+        from idp.security.access import PERMISSIONS
+        for index,(role,permissions) in enumerate(PERMISSIONS.items()):
+            with self.subTest(role=role):
+                username=f'permission-role-{index}'
+                AuthService(self.repo).create_user(username,self.password,role,['Finance'])
+                employee=TestClient(self.app,headers={'x-idp-request':'1'});self.login(username,employee)
+                self.assertEqual(set(employee.get('/api/session').json()['permissions']),permissions)
+                for route,permission in (('/api/overview','analytics'),('/api/documents','documents'),('/api/review','review'),('/api/users','users'),('/api/audit','security_audit')):
+                    self.assertEqual(employee.get(route).status_code,200 if permission in permissions else 403,(role,route))
+                if role!='Administrator':
+                    self.assertEqual(employee.post('/api/users',json={'username':'forged-user','password':self.password,'role':'Administrator','departments':[]}).status_code,403)
+                if role not in ('Administrator','Legal Reviewer'):
+                    self.assertEqual(employee.post(f'/api/documents/{self.contract}/decision',json={
+                        'expected_revision':0,'reason':'Attempt outside department','confirmed':True,'decision':'rejected'}).status_code,403)

@@ -67,3 +67,17 @@ def migrate_onboarding(repository):
         db.execute('CREATE TABLE setup_authorizations(id INTEGER PRIMARY KEY CHECK(id=1),token_hash TEXT,expires_at REAL NOT NULL,used INTEGER NOT NULL DEFAULT 0)')
         db.execute("CREATE TABLE registration_requests(id INTEGER PRIMARY KEY,username TEXT NOT NULL UNIQUE COLLATE NOCASE,password_hash TEXT,status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved')),created_at TEXT NOT NULL,approved_at TEXT,approved_by INTEGER REFERENCES users(id),revision INTEGER NOT NULL DEFAULT 0)")
         db.execute('CREATE INDEX registrations_pending ON registration_requests(status,created_at,id)')
+
+
+def migrate_department_requests(repository):
+    """Add untrusted preferences and decline metadata without rebuilding old rows."""
+    with repository._connect() as db:
+        if 'requested_department' in {row[1] for row in db.execute('PRAGMA table_info(registration_requests)')}: return
+        if any(db.execute('SELECT count(*) FROM '+table).fetchone()[0] for table in ('users','registration_requests','documents')):
+            backup=Path(str(repository.db_path)+'.before_department_requests_v1.'+datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')+'.db')
+            with closing(sqlite3.connect(backup)) as destination: db.backup(destination)
+        db.execute('BEGIN IMMEDIATE')
+        if 'requested_department' in {row[1] for row in db.execute('PRAGMA table_info(registration_requests)')}: return
+        db.execute('ALTER TABLE registration_requests ADD COLUMN requested_department TEXT')
+        db.execute('ALTER TABLE registration_requests ADD COLUMN rejected_by INTEGER REFERENCES users(id)')
+        db.execute('ALTER TABLE registration_requests ADD COLUMN rejected_at TEXT')

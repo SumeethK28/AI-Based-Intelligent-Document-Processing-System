@@ -1,3 +1,4 @@
+import { businessText } from "./presentation";
 export type RecordData = Record<string, any>;
 export type Session = {
   id: number;
@@ -33,7 +34,7 @@ export async function api<T = RecordData>(
       window.dispatchEvent(new Event("idp-session-ended"));
     throw new Error(
       typeof error.detail === "string"
-        ? error.detail
+        ? businessText(error.detail)
         : "Check the supplied fields and try again.",
     );
   }

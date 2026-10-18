@@ -21,15 +21,16 @@ import {
 import { Filters } from "./Documents";
 
 export function Insights() {
+  const { permissions } = useContext(ActionContext);
+  const operationalOnly=!allowed(permissions,"documents");
   const [filters, setFilters] = useState<RecordData>({}),
-    [area, setArea] = useState("Financial"),
-    [dimension, setDimension] = useState("currency"),
+    [area, setArea] = useState(operationalOnly ? "Operations" : "Financial"),
+    [dimension, setDimension] = useState(operationalOnly ? "types" : "currency"),
     [currency, setCurrency] = useState("");
   const { data, error, loading } = useLoad(
       "/analytics?" + new URLSearchParams(filters),
       true,
-    ),
-    { permissions } = useContext(ActionContext);
+    );
   if (!data || error)
     return (
       <>
@@ -207,7 +208,8 @@ export function Insights() {
             <Table rows={[data.processing_time, data.batch_attempt_time]} />
           </Detail>
           <Detail title="Batch outcomes">
-            <pre>{JSON.stringify(data.batches, null, 2)}</pre>
+            <Table rows={Object.entries(data.batches ?? {}).filter(([key])=>key!=="states").map(([measure,value])=>({measure:words(measure),value}))} />
+            <Table rows={Object.entries(data.batches?.states ?? {}).map(([state,count])=>({state,count}))} />
           </Detail>
         </Panel>
       )}

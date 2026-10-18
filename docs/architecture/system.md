@@ -66,10 +66,30 @@ References confer no edit rights. Reviewers cannot mutate another employee's ass
 case. Actor identity comes from the session. Original routing and current ownership
 remain separate. Exact predicates: `security/access.py`, `review/service.py`.
 
+Navigation uses the same server-issued permissions: Overview/Insights require
+`analytics`, Documents requires `documents`, My Work requires `review`, Administration
+requires `security_audit`. These checks hide irrelevant destinations; API/services
+and repository scopes remain authoritative. Administrators see pending requests and
+intake, reviewers receive department-specific home guidance and queues, Auditors get
+read-only history guidance, and Operations Managers default to operational insights.
+Existing scoped upload and reference-document workflows remain available.
+
+Public registration stores a requested department, never an approved role. Requests
+cannot create sessions. Only an authenticated Administrator can approve a server-valid
+role/scope or decline a current request. See operations for migration/decline semantics.
+
+`frontend/src/presentation.ts` centralizes display labels and safe failure guidance.
+Document details distinguish validation failures, purchase-order discrepancies, policy
+escalations and human decisions, with recorded reasons and next steps. Source evidence,
+recognized text and original extracted values remain inspectable on demand. Administrator
+diagnostics display an allowlist of confidence/stage metadata, never raw model responses,
+credentials or source paths. These transformations do not alter persisted outputs,
+financial calculations, extraction prompts, orchestration, routing or approval safeguards.
+
 ## Persistence and migration lifecycle
 
 `DocumentRepository` creates base schema then additive/idempotent batch, review,
-policy, security, collaboration and onboarding migrations. Populated legacy stores
+policy, security, collaboration, onboarding and department-request migrations. Populated legacy stores
 receive migration-specific backups where implemented. Never initialize an application
 repository for a read-only historical audit: construction can migrate the database.
 

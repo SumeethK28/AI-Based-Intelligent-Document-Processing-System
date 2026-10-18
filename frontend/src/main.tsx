@@ -18,6 +18,7 @@ import {
   Upload,
 } from "lucide-react";
 import { api, Session } from "./api";
+import { destinations } from "./presentation";
 
 import {
   message,
@@ -80,13 +81,8 @@ function App() {
     }
   };
   const permissions = session?.permissions ?? [],
-    links = [
-      ["Overview", LayoutDashboard, "analytics"],
-      ["Documents", Files, "documents"],
-      ["My Work", ClipboardCheck, "review"],
-      ["Insights", ChartNoAxesCombined, "analytics"],
-      ["Administration", Settings, "security_audit"],
-    ] as const;
+    links = destinations.map((item,index) => [item.name,
+      [LayoutDashboard, Files, ClipboardCheck, ChartNoAxesCombined, Settings][index],item.permission] as const);
   const navigate = (v: string) => {
     if (v === "Documents") setDocumentVisit((value) => value + 1);
     setDocumentView("Repository");
@@ -176,7 +172,7 @@ function App() {
               <div className="prototype-note">
                 <ShieldCheck size={18} />
                 <p>
-                  Research prototype<small>Evidence before decisions.</small>
+                  Document workspace<small>Clear information. Accountable decisions.</small>
                 </p>
               </div>
               <div className="account">

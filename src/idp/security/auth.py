@@ -10,6 +10,7 @@ from argon2.exceptions import VerificationError, InvalidHashError
 ROLES=('Administrator','Finance Reviewer','Procurement Reviewer','Expense Reviewer','Legal Reviewer','Document Reviewer','Auditor','Operations Manager')
 DEPARTMENTS=('Finance','Procurement','Expense Processing','Legal','Document Review','Risk Review','Document Operations')
 REVIEW_DEPARTMENT={'Finance Reviewer':'Finance','Procurement Reviewer':'Procurement','Expense Reviewer':'Expense Processing','Legal Reviewer':'Legal','Document Reviewer':'Document Review'}
+REQUEST_DEPARTMENTS=('Finance','Procurement','Expense Processing','Legal','Document Review','Operations / Other')
 HASHER=PasswordHasher()
 DUMMY=HASHER.hash(secrets.token_urlsafe(32))
 
@@ -156,7 +157,9 @@ class AuthService:
     def users(self):
         self.repository.require('users')
         with self.repository._connect() as db:
-            return [dict(row) for row in db.execute('SELECT id,username,role,departments,active,revision FROM users ORDER BY id')]
+            return [dict(row) for row in db.execute('''SELECT u.id,u.username,u.role,u.departments,u.active,u.revision,r.requested_department
+                FROM users u LEFT JOIN registration_requests r ON r.username=u.username AND r.status='approved' AND r.rejected_at IS NULL
+                ORDER BY u.id''')]
 
     def update_user(self,user_id,expected_revision,*,active,role,departments):
         actor=self.repository.require('users')
@@ -246,8 +249,10 @@ class AuthService:
         self._public_budget('setup-attempts',10)
         return self._bootstrap(username,password,setup_token)
 
-    def register(self,username,password):
+    def register(self,username,password,requested_department=None):
         self._public_budget('registration-attempts',30)
+        if requested_department is not None and requested_department not in REQUEST_DEPARTMENTS:
+            raise ValueError('Choose a supported department request.')
         if self.onboarding_status()['setup_required']:
             raise ValueError('Organization setup must be completed before employee registration.')
         name,hashed=self.credential_values(username,password)
@@ -255,14 +260,14 @@ class AuthService:
             db.execute('BEGIN IMMEDIATE')
             # Duplicates never replace credentials or disclose account existence.
             if not db.execute('SELECT 1 FROM users WHERE username=?',(name,)).fetchone():
-                db.execute('INSERT OR IGNORE INTO registration_requests(username,password_hash,created_at) VALUES(?,?,?)',(name,hashed,self.repository.timestamp()))
+                db.execute('INSERT OR IGNORE INTO registration_requests(username,password_hash,created_at,requested_department) VALUES(?,?,?,?)',(name,hashed,self.repository.timestamp(),requested_department))
             self.event('registration_received','allowed','employee_request',db=db)
         return {'message':'If eligible, your request is awaiting administrator approval. You can sign in only after approval.'}
 
     def registrations(self):
         self.repository.require('users')
         with self.repository._connect() as db:
-            return [dict(row) for row in db.execute("SELECT id,username,status,created_at,revision FROM registration_requests WHERE status='pending' ORDER BY created_at,id")]
+            return [dict(row) for row in db.execute("SELECT id,username,status,created_at,revision,requested_department FROM registration_requests WHERE status='pending' AND rejected_at IS NULL ORDER BY created_at,id")]
 
     def approve_registration(self,request_id,expected_revision,role,departments):
         self.repository.require('users')
@@ -271,7 +276,7 @@ class AuthService:
             db.execute('BEGIN IMMEDIATE')
             actor=self.repository.require('users')
             row=db.execute('SELECT * FROM registration_requests WHERE id=?',(request_id,)).fetchone()
-            if not row or row['status']!='pending' or row['revision']!=expected_revision:
+            if not row or row['status']!='pending' or row['rejected_at'] is not None or row['revision']!=expected_revision:
                 raise ValueError('Registration changed. Refresh before approving.')
             if db.execute('SELECT 1 FROM users WHERE username=?',(row['username'],)).fetchone():
                 raise ValueError('Account already exists. Manage its access instead of replacing credentials.')
@@ -279,3 +284,15 @@ class AuthService:
             db.execute("UPDATE registration_requests SET status='approved',password_hash=NULL,approved_by=?,approved_at=?,revision=revision+1 WHERE id=?",(actor['id'],self.repository.timestamp(),request_id))
             self.event('registration_approved','allowed',str(user_id),actor['id'],db)
         return user_id
+
+    def reject_registration(self,request_id,expected_revision):
+        self.repository.require('users')
+        with self.repository._connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            actor=self.repository.require('users')
+            row=db.execute('SELECT * FROM registration_requests WHERE id=?',(request_id,)).fetchone()
+            if not row or row['status']!='pending' or row['rejected_at'] is not None or row['revision']!=expected_revision:
+                raise ValueError('Registration changed. Refresh before declining.')
+            db.execute('UPDATE registration_requests SET password_hash=NULL,rejected_by=?,rejected_at=?,revision=revision+1 WHERE id=?',
+                       (actor['id'],self.repository.timestamp(),request_id))
+            self.event('registration_declined','allowed',str(request_id),actor['id'],db)

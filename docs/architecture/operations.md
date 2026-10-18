@@ -41,11 +41,26 @@ the previous one; initialized stores reject another bootstrap. No account is cre
 by the authorization command. Existing interactive CLI `bootstrap` is an alternative.
 
 Ordinary employees see Sign in / Create account. They choose their own credentials,
-not privileged roles. Requests remain pending with zero access. Administrator → People
-verifies the request, approves a role/department, and the employee can then sign in.
+not privileged roles. The form requests Finance, Procurement, Expense Processing,
+Legal, Document Review, or Operations / Other. This preference grants no permissions.
+Requests remain pending with zero access. Administrator → People shows the preference,
+verifies the employee, and selects the actual role/department or declines the request.
+Reviewer roles retain their server-selected department even if a client sends another.
+Approval/decline requires confirmation and the current request revision, and records
+the authenticated Administrator. Declined requests cannot sign in or later be approved;
+their password hash is cleared. A duplicate request does not reopen a declined request.
 Duplicate requests never replace credentials or reveal existing accounts. Setup and
 registration have separate bounded attempt budgets. Operator instructions belong in
 this guide, not every employee's login screen.
+
+The additive department-request migration adds nullable `requested_department`,
+`rejected_by` and `rejected_at` columns. Populated stores receive a timestamped
+`.before_department_requests_v1.*.db` backup before migration. Legacy rows remain
+unchanged; requests without a preference can still be reviewed. To preserve the old
+status constraint without rebuilding history, declined requests retain `status=pending`
+with `rejected_at` set; both pending-list and approval predicates exclude them.
+Schema creation is automatic when starting against the selected database. Read-only
+historical audits must not construct a repository. Keep backups private.
 
 Returning employees retain authorized assignments, queues, documents/history,
 decisions and summaries. Deactivation, session revocation, secure password changes,
@@ -112,6 +127,7 @@ still requires local authorization before its first Administrator can be created
 uv run --frozen --python 3.14.6 python scripts/run_tests.py
 uv run --frozen --python 3.14.6 python -m unittest discover -s tests -p 'test_*.py' -v
 npm --prefix frontend run build
+node --experimental-strip-types --test frontend/tests/presentation.test.mjs
 ```
 
 Tests use isolated synthetic data and simulated LLMs; existing PDF OCR tests use real

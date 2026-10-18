@@ -22,6 +22,7 @@ import {
   Metric,
 } from "./components";
 import { Filters } from "./Documents";
+import { roleHome } from "./presentation";
 
 export function Overview({ navigate, session }: { navigate: (v: string) => void; session: Session }) {
   const [filters, setFilters] = useState<RecordData>({});
@@ -39,15 +40,14 @@ export function Overview({ navigate, session }: { navigate: (v: string) => void;
       </>
     );
   if (!data) return <State loading />;
+  const home=roleHome(session.role);
   return (
     <>
       <div className="intro">
         <div>
-          <span className="eyebrow">YOUR OPERATION, AT A GLANCE</span>
-          <h1>Workspace overview</h1>
-          <p>
-            Know what is ready, what needs attention, and where work is waiting.
-          </p>
+          <span className="eyebrow">YOUR WORKSPACE</span>
+          <h1>{home.title}</h1>
+          <p>{home.description}</p>
         </div>
         {allowed(permissions, "intake") && (
           <Button primary onClick={() => navigate("Documents")}>
@@ -58,15 +58,16 @@ export function Overview({ navigate, session }: { navigate: (v: string) => void;
       </div>
       <Panel title={`Welcome, ${session.username}`}>
         <p>{session.role} · {session.departments.join(", ")}</p>
+        <Button primary onClick={() => navigate(home.destination)}>{home.action}</Button>
+        {session.role === "Administrator" && <p className="account-request-summary">{data.pending_registrations ?? 0} employee requests awaiting a decision.</p>}
         {data.employee_work && <>
           <div className="metrics secondary">
             <Metric label="Assigned to me" value={data.employee_work.assigned_to_me} />
             <Metric label="Unclaimed department cases" value={data.employee_work.unclaimed} />
             <Metric label="Department awaiting action" value={data.employee_work.department_cases} />
-            <Metric label="Reconciliation issues" value={data.employee_work.reconciliation_issues} />
+            <Metric label="Purchase order discrepancies" value={data.employee_work.reconciliation_issues} />
           </div>
-          {data.employee_work.department_cases === 0 && <p className="empty">You have no department cases awaiting action. New work will appear when routed or assigned; this does not mean the organization has no documents.</p>}
-          <Button onClick={() => navigate("My Work")}>Open my work</Button>
+          {data.employee_work.department_cases === 0 && <p className="empty">No work is waiting in your approved department scope. You can still inspect authorized records and recent decisions.</p>}
           <Detail title="Recent department decisions"><Table rows={data.employee_work.recent_decisions} /></Detail>
           {data.employee_work.previous_sign_in && <Detail title="Changes since your previous sign-in">
             <p className="footnote">Since {data.employee_work.previous_sign_in} · recorded updates only</p>

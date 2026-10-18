@@ -11,6 +11,7 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import { api, download, RecordData } from "./api";
+import { businessText, documentOutcome, failureGuidance, statusLabel, historyValue } from "./presentation";
 
 import {
   words,
@@ -274,23 +275,19 @@ export function Issues({ state }: { state: RecordData }) {
     ...(state.validation_warnings ?? []),
     ...(state.cross_document_issues ?? []),
     ...(state.anomalies ?? []),
+    ...(state.rule_outcomes ?? []).filter((r: RecordData) => r.escalates),
   ];
   const messages = [
     ...new Set(
       checks.map((item: any) =>
-        typeof item === "string" ? item : (item.description ?? item.code),
+        businessText(typeof item === "string" ? item : (item.description ?? words(item.code))),
       ),
     ),
   ];
   return (
-    <>
-      {messages.map((text, i) => (
-        <div key={i} className="notice warning">
-          <AlertTriangle size={17} />
-          <span>{text}</span>
-        </div>
-      ))}
-    </>
+    messages.length ? <div className="notice warning"><AlertTriangle size={17} />
+      <div><strong>Checks needing attention</strong><ul className="issue-list">{messages.map((text,i)=><li key={i}>{text}</li>)}</ul></div>
+    </div> : null
   );
 }
 
@@ -317,6 +314,7 @@ export function DocumentDetail({
   if (!data) return <State error={error} loading={!error} />;
   const state = data.full_result,
     fields = state.extracted_fields ?? {};
+  const outcome = documentOutcome(state,data.review_decision,!!data.collaboration?.can_review);
   const groups: RecordData = {
     "Document identity": [
       "invoice_number",
@@ -389,7 +387,7 @@ export function DocumentDetail({
           ["Workflow", state.workflow_status],
           [
             "Validation",
-            state.validation_passed ? "Passed" : "Needs attention",
+            state.validation_passed === true ? "Passed" : state.validation_passed === false ? "Failed validation" : "Not recorded",
           ],
           ["PO verification", state.cross_document_status],
           ["Risk", state.risk_level],
@@ -397,25 +395,16 @@ export function DocumentDetail({
         ].map(([label, value]) => (
           <div key={label}>
             <small>{label}</small>
-            <Badge value={value} />
+            <Badge value={value} department={state.assigned_department} />
           </div>
         ))}
       </div>
-      <div className="notice">
+      <div className="notice outcome">
         <ShieldCheck size={18} />
-        <span>
-          {state.routing_reason ?? "Routing explanation unavailable."}{" "}
-          Preliminary checks never authorize a payment or legal agreement.
-        </span>
+        <div className="outcome-summary"><strong>{outcome.title}</strong><p>{outcome.reason}</p><p><strong>Next step: </strong>{outcome.next}</p>
+          <small>Preliminary checks never authorize a payment or legal agreement.</small></div>
       </div>
       <Issues state={state} />
-      {(state.rule_outcomes ?? [])
-        .filter((r: any) => r.escalates)
-        .map((r: any, i: number) => (
-          <p key={i} className="notice warning">
-            {r.description}
-          </p>
-        ))}
       <div className="document-columns">
         <div>
           <Panel title="Extracted information">
@@ -431,7 +420,7 @@ export function DocumentDetail({
                           {words(name === "tax_id" ? "seller tax ID" : name)}
                         </dt>
                         <dd>
-                          {fields[name] || (
+                          {fields[name] != null && fields[name] !== "" ? String(fields[name]) : (
                             <span className="muted">Not extracted</span>
                           )}
                         </dd>
@@ -479,8 +468,8 @@ export function DocumentDetail({
                         "human_correction"
                           ? "Recorded human correction"
                           : state.fallback_used?.includes(field)
-                            ? "Verified OCR/layout recovery"
-                            : "Model extraction"}
+                            ? "Source-supported recovery"
+                            : "Extracted from the document"}
                       </small>
                     </div>
                   ),
@@ -506,24 +495,13 @@ export function DocumentDetail({
                 state={{ cross_document_issues: state.cross_document_issues }}
               />
             </Detail>
-            <Detail title="Recognized text and technical details">
+            <Detail title="Recognized source text">
               <pre>{state.ocr_text || "No recognized text recorded."}</pre>
-              <pre>
-                {JSON.stringify(
-                  {
-                    agent_history: state.agent_history,
-                    rule_outcomes: state.rule_outcomes,
-                    field_provenance: state.field_provenance,
-                    ocr_confidence: state.ocr_confidence,
-                    classification_confidence: state.classification_confidence,
-                    extraction_confidence: state.extraction_confidence,
-                    policy_version_id: state.policy_version_id,
-                  },
-                  null,
-                  2,
-                )}
-              </pre>
             </Detail>
+            {allowed(permissions,"security_audit") && <Detail title="Sanitized processing diagnostics">
+              <Table rows={[{ocr_confidence:state.ocr_confidence,classification_confidence:state.classification_confidence,extraction_confidence:state.extraction_confidence,policy_version_id:state.policy_version_id}]} />
+              <Table rows={(state.agent_history ?? []).map((stage: unknown)=>({stage:businessText(stage)}))} />
+            </Detail>}
           </Panel>
         </div>
         <div>
@@ -569,8 +547,7 @@ export function DocumentDetail({
                 <FileText />
                 <p>No retained source is available for this document.</p>
                 <small>
-                  Single uploads are temporary. Extracted data and processing
-                  history remain preserved.
+                  Some older records have no retained original. Extracted data and processing history remain preserved.
                 </small>
               </div>
             )}
@@ -591,8 +568,13 @@ export function DocumentDetail({
                   "created_at",
                 ]}
               />
-              <Detail title="Full event details">
-                <pre>{JSON.stringify(data.events, null, 2)}</pre>
+              <Detail title="Changed values and notes">
+                {data.events.map((event: RecordData)=><Detail key={event.id} title={`${words(event.event_type)} · ${event.created_at}`}>
+                  <p>{businessText(event.notes)}</p>
+                  <p className="footnote">Revision {event.previous_revision} → {event.new_revision} · Policy version {event.rule_versions?.policy_version_id ?? "Not recorded"}</p>
+                  <Table rows={Object.entries(event.new_values ?? {}).map(([field,value])=>({field:words(field),previous_value:historyValue(field,event.previous_values?.[field]),value:historyValue(field,value)}))} />
+                  {event.validation_results && <><Table rows={[event.validation_results]} keys={["validation_passed","cross_document_status","risk_level","workflow_status"]} /><Issues state={event.validation_results} /><Table rows={event.validation_results.rule_outcomes ?? []} keys={["description","outcome","escalates"]} /></>}
+                </Detail>)}
               </Detail>
             </Detail>
             <Detail title="Processing history">
@@ -600,13 +582,12 @@ export function DocumentDetail({
                 rows={data.runs}
                 keys={["id", "processed_at", "is_duplicate"]}
               />
-              <pre>{JSON.stringify(data.runs, null, 2)}</pre>
             </Detail>
             <Detail title="Preserved processing originals">
-              <pre>{JSON.stringify(data.versions, null, 2)}</pre>
+              {data.versions.map((version: RecordData)=><Detail key={version.id} title={`Original ${version.id} · ${version.captured_at}`}><OriginalVersion version={version} /></Detail>)}
             </Detail>
             <Detail title="Recorded policy checks">
-              <pre>{JSON.stringify(state.rule_outcomes, null, 2)}</pre>
+              <Table rows={state.rule_outcomes ?? []} keys={["description","outcome","escalates"]} />
             </Detail>
           </Panel>
         </div>
@@ -615,10 +596,18 @@ export function DocumentDetail({
   );
 }
 
+function OriginalVersion({version}:{version:RecordData}) {
+  let original: RecordData;
+  try { original=JSON.parse(version.original_state); } catch { return <p>Original information could not be displayed. Contact your administrator.</p>; }
+  return <><p>{businessText(original.routing_reason)}</p><Badge value={original.workflow_status} department={original.assigned_department} />
+    <Table rows={Object.entries(original.extracted_fields ?? {}).map(([field,value])=>({field:words(field),value,evidence:original.field_evidence?.[field]}))} />
+    <Issues state={original} /></>;
+}
+
 export function LinkedDocument({ id }: { id: number }) {
   const { data, error } = useLoad("/documents/" + id);
   return data ? (
-    <div><p className="footnote">Read-only reference · {data.case?.team} · {words(data.review_decision)}. Last updated: {data.collaboration?.last_updated}.</p><dl>
+    <div><p className="footnote">Read-only reference · {data.case?.team} · {statusLabel(data.review_decision)}. Last updated: {data.collaboration?.last_updated}.</p><dl>
       {Object.entries(data.extracted_data ?? {}).map(([k, v]) => (
         <div key={k}>
           <dt>{words(k)}</dt>
@@ -704,7 +693,7 @@ export function ReviewActions({ document: doc }: { document: RecordData }) {
                 setPreview(undefined);
               }}
             />
-            <Field label="Original OCR evidence quote">
+            <Field label="Supporting quote from the source text">
               <textarea
                 value={evidence[field] ?? ""}
                 onChange={(e) => {
@@ -738,7 +727,7 @@ export function ReviewActions({ document: doc }: { document: RecordData }) {
                 preview.state.validation_passed ? "Passed" : "Needs attention"
               }
             />
-            <pre>{JSON.stringify(preview.state.rule_outcomes, null, 2)}</pre>
+            <Table rows={preview.state.rule_outcomes ?? []} keys={["description","outcome","escalates"]} />
           </>
         )}
         <Button
@@ -960,12 +949,12 @@ export function UploadForm({ onSaved }: { onSaved: (id: string) => void }) {
           setKey(crypto.randomUUID());
         }}
       >
-        Force reprocessing of existing documents. This uses API quota and resets
+        Force reprocessing of existing documents. This uses processing resources and resets
         review decisions.
       </Confirm>
       )}
       <Confirm value={consent} set={setConsent}>
-        I authorize sending these documents’ OCR text to Groq and retaining
+        I authorize sending these documents’ recognized text to the external AI processing service and retaining
         their sources locally under the configured retention policy.
       </Confirm>
       <div className="actions">
@@ -1102,12 +1091,12 @@ export function Batches({
         <Panel title="Processing progress">
           <div className="metrics">
             {Object.entries(details.data.counts ?? {}).map(([label, value]) => (
-              <Metric key={label} label={words(label)} value={value} />
+              <Metric key={label} label={statusLabel(label)} value={value} />
             ))}
           </div>
           {pending && !busy && (
             <Confirm value={consent} set={setConsent}>
-              I authorize external Groq processing to resume this saved upload.
+              I authorize external AI processing to resume this saved upload.
             </Confirm>
           )}
           <div className="actions">
@@ -1144,12 +1133,12 @@ export function Batches({
           <p className="footnote">
             Progress refreshes while files are queued or processing. Keep the
             local server running. If processing is interrupted, open this saved
-            job and resume; completed items are reused. Processing is serial,
-            and invoice/PO checks are reconciled after the job completes.
+            job and resume; completed items are reused. Related invoices and purchase orders are checked again after the job completes.
           </p>
           <Table
             rows={details.data.items ?? []}
             keys={["id", "filename", "state", "attempts", "safe_error"]}
+            cells={{safe_error:(item)=>item.state === "failed" ? failureGuidance(item.error_category,item.safe_error) : businessText(item.safe_error)}}
           />
           <Field label="Inspect a completed document">
             <select
@@ -1183,11 +1172,11 @@ export function Batches({
               </Button>
             ))}
           <Detail title="Attempt history">
-            <pre>{JSON.stringify(details.data.attempts, null, 2)}</pre>
+            <Table rows={details.data.attempts ?? []} keys={["item_id","attempt","state","started_at","completed_at","duration_seconds","safe_error"]} />
           </Detail>
           <Detail title="Outcomes and financial totals">
             <Table rows={details.data.financial_totals ?? []} />
-            <pre>{JSON.stringify(details.data.distributions, null, 2)}</pre>
+            {Object.entries(details.data.distributions ?? {}).map(([name,values])=><div key={name}><h3>{words(name)}</h3><Table rows={Object.entries(values as RecordData).map(([outcome,count])=>({outcome:statusLabel(outcome),count}))} /></div>)}
           </Detail>
         </Panel>
       )}
