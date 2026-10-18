@@ -2,6 +2,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { accountTypes, accountTypeLabel, historyValue, optionLabel, words, businessText, statusLabel, documentOutcome, failureGuidance, roleHome, destinations } from '../src/presentation.ts';
 
+test('configuration and credential failures never tell employees to replace the source',()=>{
+  for(const category of ['configuration','credentials']) {
+    const text=failureGuidance(category,'Source is damaged. synthetic sensitive diagnostic');
+    assert.match(text,/administrator before retrying/);
+    assert.doesNotMatch(text,/source|damaged|synthetic|GROQ|key|\.env/i);
+  }
+  assert.equal(failureGuidance('document','Source is unavailable or damaged.'),'Source is unavailable or damaged.');
+});
+
 test('six employee account labels map to existing unprivileged department preferences',()=>{
   assert.deepEqual(accountTypes.map(type=>[type.department,type.label]),[
     ['Finance','Finance employee'],['Procurement','Procurement employee'],

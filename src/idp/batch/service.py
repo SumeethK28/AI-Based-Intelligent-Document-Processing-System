@@ -14,6 +14,7 @@ from pathlib import Path
 from idp.batch.ingestion import preview, inspect_file
 from idp.utils.exports import spreadsheet_safe
 from idp.utils.money import parse_money
+from idp.llm.provider import ProviderConfigurationError
 
 TERMINAL = {'completed','duplicate','failed','review_required'}
 LOGGER = logging.getLogger(__name__)
@@ -51,7 +52,7 @@ def worker_lock(path):
 def safe_failure(error):
     # Never persist provider exception strings, keys, response bodies or local paths.
     status = getattr(error, 'status_code', None)
-    if isinstance(error, ValueError) and str(error).startswith('GROQ_API_KEY is missing.'):
+    if isinstance(error, ProviderConfigurationError) or (isinstance(error, ValueError) and str(error).startswith('GROQ_API_KEY is missing.')):
         return 'configuration', 'Document processing is not configured. Contact your administrator.'
     if status == 429:
         return 'rate_limit', 'Processing is temporarily unavailable. Retry later.'
@@ -64,6 +65,16 @@ def safe_failure(error):
     if isinstance(error, (ValueError, FileNotFoundError)):
         return 'document', 'Source is unavailable, damaged, changed or could not be processed. Check retained source.'
     return 'processing', 'Document processing failed. Other items continue; inspect the source and retry.'
+
+
+def administrator_failure_guidance(category):
+    """Static operational guidance; never include exception or environment values."""
+    if category in {'configuration', 'credentials'}:
+        return ('On the application host, configure a valid GROQ_API_KEY and an available '
+                'GROQ_MODEL in the private .env file or service environment. Restart the web '
+                'application and batch worker with the same configuration, then retry the '
+                'saved failed item. Do not share the key or upload the document again.')
+    return None
 
 
 class BatchService:

@@ -45,6 +45,39 @@ class WebTests(PipelineFixture):
         rows=self.client.get('/api/documents').json()['rows']
         self.assertNotIn(self.contract,[row['id'] for row in rows])
 
+    def test_configuration_failure_guidance_is_admin_only_and_source_is_retained(self):
+        import os
+        from idp.llm.provider import GroqProvider
+        from idp.batch.service import BatchService
+        from idp.storage.repository import DocumentRepository
+        from idp.security import INTERNAL
+        app=create_app(self.repo.db_path,pipeline_factory=lambda repo:GroqProvider())
+        client=TestClient(app,headers={'x-idp-request':'1'})
+        for username in ('web-admin','web-finance'):
+            with self.subTest(username=username):
+                self.login(username,client)
+                stream=io.BytesIO();doc=canvas.Canvas(stream);doc.drawString(50,750,'Synthetic configuration test');doc.save()
+                response=client.post('/api/uploads/batch',files=[('files',('test.pdf',stream.getvalue(),'application/pdf'))],data={'consent':'true','request_key':username})
+                self.assertEqual(response.status_code,200,response.text)
+                job=response.json()['batch_id']
+                with patch.dict(os.environ,{'GROQ_API_KEY':''}):
+                    run=client.post(f'/api/batches/{job}/run',json={'consent':True})
+                self.assertEqual(run.status_code,200,run.text)
+                response=client.get(f'/api/batches/{job}')
+                self.assertEqual(response.status_code,200)
+                item=response.json()['items'][0]
+                self.assertEqual(item['error_category'],'configuration')
+                self.assertNotIn('source',item['safe_error'].lower())
+                if username=='web-admin':
+                    self.assertIn('GROQ_API_KEY',item['configuration_guidance'])
+                    self.assertIn('Restart',item['configuration_guidance'])
+                else:
+                    self.assertNotIn('configuration_guidance',item)
+                    self.assertNotIn('GROQ_API_KEY',response.text)
+                service=BatchService(DocumentRepository(self.repo.db_path,_capability=INTERNAL))
+                self.assertEqual(service.source(service.items(job)[0]).read_bytes(),stream.getvalue())
+                self.assertEqual(len(service.attempts(item['id'])),1)
+
     def test_single_upload_removes_temporary_source_on_success_and_failure_without_results(self):
         import tempfile
         from idp.pipeline.agentic_pipeline import AgenticDocumentPipeline

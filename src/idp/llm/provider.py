@@ -13,15 +13,16 @@ load_dotenv()
 T = TypeVar("T", bound=BaseModel)
 
 
+class ProviderConfigurationError(ValueError):
+    """Safe configuration failure, distinct from invalid document contents."""
+
+
 class GroqProvider:
     def __init__(self):
         api_key = os.getenv("GROQ_API_KEY")
 
-        if not api_key:
-            raise ValueError(
-                "GROQ_API_KEY is missing. "
-                "Add it to the project's .env file."
-            )
+        if not api_key or not api_key.strip():
+            raise ProviderConfigurationError("AI processing configuration is missing.")
 
         self.client = Groq(
             api_key=api_key,
@@ -33,6 +34,8 @@ class GroqProvider:
             "GROQ_MODEL",
             "openai/gpt-oss-120b",
         )
+        if not self.model.strip():
+            raise ProviderConfigurationError("AI processing model is not configured.")
 
     def _request(self, **kwargs):
         """At most three attempts for transient failures; never retry auth/400 errors."""
@@ -40,6 +43,13 @@ class GroqProvider:
             try:
                 return self.client.chat.completions.create(**kwargs)
             except (APIConnectionError, APIStatusError) as error:
+                # Only explicit model-configuration codes qualify. Other bad
+                # requests must not be inferred to be configuration failures.
+                body = getattr(error, "body", None)
+                details = body.get("error", body) if isinstance(body, dict) else {}
+                code = details.get("code") if isinstance(details, dict) else None
+                if isinstance(error, APIStatusError) and error.status_code in {400, 404} and code in {"model_not_found", "model_decommissioned", "model_not_supported"}:
+                    raise ProviderConfigurationError("AI processing model is unavailable.") from None
                 if isinstance(error, APIStatusError) and error.status_code not in {408, 409, 429} and error.status_code < 500:
                     raise
                 if attempt == 2:

@@ -67,6 +67,78 @@ class BatchTests(unittest.TestCase):
     def run_job(self,job,**kwargs):
         return self.service.run(lambda:self.pipeline,job,**kwargs)
 
+    def test_provider_configuration_failures_preserve_sources_attempts_and_retry(self):
+        import os
+        import httpx
+        from groq import APIStatusError
+        from idp.llm.provider import GroqProvider
+        request=httpx.Request('POST','https://api.groq.com/openai/v1/chat/completions')
+        invalid=APIStatusError('Synthetic sensitive diagnostic',response=httpx.Response(401,request=request),body=None)
+        for case in ('missing','whitespace','invalid'):
+            with self.subTest(case=case):
+                job=self.submit('receipt',key=case)
+                item=self.service.items(job)[0]
+                source=self.service.source(item); original=source.read_bytes()
+                def factory():
+                    if case=='invalid':
+                        provider=GroqProvider.__new__(GroqProvider)
+                        from unittest.mock import Mock
+                        provider.client=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=Mock(side_effect=invalid))))
+                        return SimpleNamespace(process=lambda *args,**kwargs:provider._request())
+                    return GroqProvider()
+                with patch.dict(os.environ,{'GROQ_API_KEY':' ' if case=='whitespace' else ''}):
+                    self.service.run(factory,job)
+                failed=self.service.items(job)[0]
+                self.assertEqual(failed['state'],'failed')
+                self.assertEqual(failed['error_category'],'credentials' if case=='invalid' else 'configuration')
+                self.assertNotIn('source',failed['safe_error'].lower())
+                self.assertNotIn('Synthetic',failed['safe_error'])
+                first=self.service.attempts(item['id'])[0]
+                self.assertEqual(first['error_category'],failed['error_category'])
+                self.assertEqual(source.read_bytes(),original)
+                self.service.retry(item['id'])
+                self.run_job(job)
+                self.assertNotEqual(self.service.items(job)[0]['state'],'failed')
+                self.assertEqual(self.service.attempts(item['id'])[0],first)
+                self.assertEqual(len(self.service.attempts(item['id'])),2)
+                self.assertEqual(source.read_bytes(),original)
+
+    def test_provider_model_configuration_is_bounded_and_not_a_source_error(self):
+        import os
+        import httpx
+        from groq import APIStatusError
+        from unittest.mock import Mock
+        from idp.llm.provider import GroqProvider, ProviderConfigurationError
+        with patch.dict(os.environ,{'GROQ_API_KEY':'synthetic-key','GROQ_MODEL':' '}), patch('idp.llm.provider.Groq'):
+            with self.assertRaises(ProviderConfigurationError) as caught: GroqProvider()
+        self.assertEqual(safe_failure(caught.exception)[0],'configuration')
+        for status,code,expected in ((400,'model_decommissioned','configuration'),(404,'model_not_found','configuration'),(400,'bad_request','request'),(429,'rate_limit','rate_limit'),(403,'forbidden','credentials')):
+            with self.subTest(status=status,code=code):
+                error=APIStatusError('Do not persist this response',response=httpx.Response(status,request=httpx.Request('POST','https://example.test')),body={'error':{'code':code}})
+                create=Mock(side_effect=error)
+                provider=GroqProvider.__new__(GroqProvider)
+                provider.client=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+                with patch('idp.llm.provider.time.sleep') as sleep:
+                    with self.assertRaises(Exception) as caught: provider._request()
+                self.assertEqual(safe_failure(caught.exception)[0],expected)
+                self.assertEqual(create.call_count,3 if status==429 else 1)
+                self.assertEqual(sleep.call_count,2 if status==429 else 0)
+
+    def test_real_retained_source_failure_is_not_configuration(self):
+        from unittest.mock import Mock
+        job=self.submit('receipt',key='damaged-source')
+        source=self.service.source(self.service.items(job)[0])
+        source.write_bytes(b'Synthetic damaged source')
+        factory=Mock()
+        self.service.run(factory,job)
+        item=self.service.items(job)[0]
+        self.assertEqual(item['state'],'failed')
+        self.assertEqual(item['error_category'],'document')
+        self.assertIn('Source',item['safe_error'])
+        factory.assert_not_called()
+        self.assertTrue(source.exists())
+        self.assertEqual(safe_failure(FileNotFoundError('private path'))[0],'document')
+
     def test_submission_database_unavailable_after_one_or_several_files(self):
         for count in (1, 3):
             with self.subTest(count=count), tempfile.TemporaryDirectory(dir=self.root) as folder:

@@ -1138,7 +1138,7 @@ export function Batches({
           <Table
             rows={details.data.items ?? []}
             keys={["id", "filename", "state", "attempts", "safe_error"]}
-            cells={{safe_error:(item)=>item.state === "failed" ? failureGuidance(item.error_category,item.safe_error) : businessText(item.safe_error)}}
+            cells={{safe_error:(item)=>item.state === "failed" ? <><span>{failureGuidance(item.error_category,item.safe_error)}</span>{item.configuration_guidance && <p className="footnote">{item.configuration_guidance}</p>}</> : businessText(item.safe_error)}}
           />
           <Field label="Inspect a completed document">
             <select

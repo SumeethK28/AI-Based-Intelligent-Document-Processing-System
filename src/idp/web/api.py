@@ -19,7 +19,7 @@ from idp.security.auth import AccessDenied, AuthenticationError, AuthService, RE
 from idp.security.access import PERMISSIONS
 from idp.security.downloads import DownloadService
 from idp.review.service import ReviewService, ReviewConflict, UnsafeApproval
-from idp.batch.service import BatchService, safe_failure
+from idp.batch.service import BatchService, safe_failure, administrator_failure_guidance
 from idp.policy.service import PolicyService
 
 COOKIE = 'idp_session'
@@ -350,6 +350,11 @@ def create_app(database_path=None, *, pipeline_factory=None, frontend=None):
         service=BatchService(repo)
         summary=service.summary(batch_id)
         items=service.items(batch_id)
+        if repo.require('account')['role'] == 'Administrator':
+            for item in summary['items']:
+                guidance = administrator_failure_guidance(item['error_category'])
+                if guidance:
+                    item['configuration_guidance'] = guidance
         return {**summary,'attempts':{item['id']:service.attempts(item['id']) for item in items}}
 
     @app.post('/api/uploads/{mode}')
