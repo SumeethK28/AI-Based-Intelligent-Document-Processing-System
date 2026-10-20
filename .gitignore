@@ -97,6 +97,8 @@ desktop.ini
 
 /results/
 /research_sources/
+# Private team guidebooks and their editable authoring assets.
+/deliverables/
 
 
 # ==========================================
